@@ -16,13 +16,6 @@
 import torch
 import torch.nn as nn
 import numpy as np
-np.bool = np.bool_
-np.int = np.int_
-np.float = np.float_
-np.complex = np.complex_
-np.object = np.object_
-np.unicode = np.unicode_
-np.str = np.str_
 import pickle
 import torch.nn.functional as F
 
@@ -35,6 +28,25 @@ def to_np(array, dtype=np.float32):
     if 'scipy.sparse' in str(type(array)):
         array = array.todense()
     return np.array(array, dtype=dtype)
+
+class ChumpyArray(object):
+    """
+    Stand-in for the chumpy arrays stored in the FLAME pickle, so that loading it does not need chumpy
+    (unmaintained, and incompatible with recent Python / numpy). It only keeps the wrapped array.
+    """
+    def __setstate__(self, state):
+        if isinstance(state, tuple):  # (instance dict, slots)
+            state = state[0]
+        self.__dict__.update(state)
+
+    def __array__(self, dtype=None, copy=None):
+        return np.asarray(self.__dict__['x'], dtype=dtype)
+
+class FlameUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module.startswith('chumpy'):
+            return ChumpyArray
+        return super().find_class(module, name)
 
 class Struct(object):
     def __init__(self, **kwargs):
@@ -52,7 +64,7 @@ class FLAME(nn.Module):
         super(FLAME, self).__init__()
 
         with open(flame_model_path, 'rb') as f:
-            ss = pickle.load(f, encoding='latin1')
+            ss = FlameUnpickler(f, encoding='latin1').load()
             flame_model = Struct(**ss)
 
         self.n_shape = n_shape

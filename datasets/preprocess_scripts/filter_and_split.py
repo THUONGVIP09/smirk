@@ -75,7 +75,9 @@ if __name__ == '__main__':
         meta_path, landmarks_path, quality_path = paths.split(',')
         meta = {r['name']: r for r in read_csv(meta_path)}
         quality = {r['name']: r for r in read_csv(quality_path)}
+        # read the arrays once: every lmk_data['...'] access decompresses the whole array again
         lmk_data = np.load(landmarks_path)
+        all_landmarks = lmk_data['landmarks']
         lmk_index = {n: i for i, n in enumerate(lmk_data['names'])}
 
         kept = []
@@ -86,7 +88,7 @@ if __name__ == '__main__':
                 reason = 'not_processed'  # not in the quality file (e.g. landmarks computed with --limit)
             elif q['detected'] != 'True':
                 reason = 'no_face'
-            elif landmarks_outside(lmk_data['landmarks'][lmk_index[name]]) > args.max_landmarks_outside:
+            elif landmarks_outside(all_landmarks[lmk_index[name]]) > args.max_landmarks_outside:
                 reason = 'face_cut'
             else:
                 for column, fails, why in checks:
@@ -121,7 +123,7 @@ if __name__ == '__main__':
             clean_rows.append([dataset, name, m['label'], m['expression'], splits[name]] +
                               [q[c] for c, _, _ in checks])
             keys.append(f'{dataset}/{name}')
-            kept_landmarks.append(lmk_data['landmarks'][lmk_index[name]])
+            kept_landmarks.append(all_landmarks[lmk_index[name]])
 
         n_rejected = sum(r[0] == dataset for r in rejected_rows)
         print(f'{dataset}: kept {len(kept)} / {len(meta)} ({100 * len(kept) / max(len(meta), 1):.1f}%), '
