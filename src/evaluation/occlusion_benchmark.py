@@ -10,12 +10,16 @@ The occluder is drawn on the full face crop with the landmarks of the clean imag
 Metrics (per test face and protocol):
     exp_dist   ||psi_occluded - psi_clean|| over the expression parameters
     exp_rel    exp_dist / ||psi_clean||
+    exp_scale  ||psi_occluded|| / ||psi_clean||; > 1 means more intense expressions under occlusion (the SMIRK paper,
+               Sec. 4.5, reports that the model "tends to assume more intense expressions" when parts are missing)
     expr_mm    mean per-vertex distance (mm) between the FLAME meshes built from the clean / occluded expression, jaw and
                eyelid parameters, with the clean shape and a neutral pose (so that pose / camera changes do not count)
     lmk_px     mean distance (pixels of the 224 crop) between the projected FLAME MediaPipe landmarks and the
                MediaPipe landmarks of the clean image (the training targets of SMIRK)
-Emotion probe: logistic regression on [expression, jaw, eyelid] of the clean train faces (7 basic expressions);
-accuracy and mean class accuracy on the clean / occluded test faces.
+Emotion probe (as the EMOCA / SMIRK protocol: an MLP on the predicted parameters): MLP on [expression, jaw, eyelid]
+of the clean train faces, all expression labels (8 with AffectNet's contempt); accuracy and mean class accuracy on the
+clean / occluded test faces, computed over the classes present in each dataset (8 for AffectNet, 7 for ExpW / RAF-DB).
+Valence / arousal are not evaluated (no such labels in the datasets used here).
 
 Run from the repository root (FLAME assets are loaded with relative paths), e.g.
     python -m src.evaluation.occlusion_benchmark --clean_dir CLEAN_FACES --image_dir expw=.../images \
@@ -47,8 +51,8 @@ SMIRK_MEDIAPIPE_INDICES = [276, 282, 283, 285, 293, 295, 296, 300, 334, 336, 46,
        415]
 PARTS = ['mouth', 'eyes', 'brows', 'nose']
 COVERED_GROUPS = {'mouth': ['mouth'], 'eyes': ['left_eye', 'right_eye'], 'brows': ['left_brow', 'right_brow'], 'nose': ['nose']}
-EXPRESSIONS = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
 CROP_SIZE = 224
+METRICS = ['exp_dist', 'exp_rel', 'exp_scale', 'expr_mm', 'lmk_px']
 
 
 def crop_matrix(landmarks, scale, size=CROP_SIZE):
@@ -129,7 +133,7 @@ def run_test(encoder, flame, loader, protocols, device):
     names = ['clean'] + protocols
     n = len(loader.dataset)
     feats = {p: np.zeros((n, 55), np.float32) for p in names}
-    metrics = {p: {m: np.full(n, np.nan, np.float32) for m in ['exp_dist', 'exp_rel', 'expr_mm', 'lmk_px']} for p in names}
+    metrics = {p: {m: np.full(n, np.nan, np.float32) for m in METRICS} for p in names}
     covered = np.zeros((n, len(protocols), len(PARTS)), np.float32)
 
     for batch in tqdm(loader, desc='test'):
@@ -153,7 +157,9 @@ def run_test(encoder, flame, loader, protocols, device):
                 continue
             dist = (out['expression_params'] - clean['expression_params']).norm(dim=1)
             metrics[protocol]['exp_dist'][idx] = dist.cpu().numpy()
-            metrics[protocol]['exp_rel'][idx] = (dist / clean['expression_params'].norm(dim=1).clamp(min=1e-6)).cpu().numpy()
+            clean_norm = clean['expression_params'].norm(dim=1).clamp(min=1e-6)
+            metrics[protocol]['exp_rel'][idx] = (dist / clean_norm).cpu().numpy()
+            metrics[protocol]['exp_scale'][idx] = (out['expression_params'].norm(dim=1) / clean_norm).cpu().numpy()
             vertices = expression_vertices(flame, clean['shape_params'], out)
             metrics[protocol]['expr_mm'][idx] = ((vertices - clean_vertices).norm(dim=-1).mean(-1) * 1000).cpu().numpy()
     return feats, metrics, covered
@@ -169,12 +175,19 @@ def run_features(encoder, flame, loader, device):
 
 
 def emotion_probe(train_feats, train_labels, test_feats):
-    """Logistic regression on clean train features; returns predictions for every test feature set."""
-    from sklearn.linear_model import LogisticRegression
+    """MLP on clean train features (EMOCA / SMIRK protocol); returns predictions for every test feature set."""
+    from sklearn.neural_network import MLPClassifier
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import make_pipeline
 
-    probe = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, class_weight='balanced'))
+    # balance the classes by resampling (MLPClassifier has no class weights)
+    rng = np.random.default_rng(0)
+    classes, counts = np.unique(train_labels, return_counts=True)
+    index = np.concatenate([rng.choice(np.where(train_labels == c)[0], counts.max(), replace=True) for c in classes])
+    train_feats, train_labels = train_feats[index], train_labels[index]
+
+    probe = make_pipeline(StandardScaler(), MLPClassifier(hidden_layer_sizes=(256, 128), alpha=1e-3, max_iter=200,
+                                                          early_stopping=True, random_state=0))
     probe.fit(train_feats, train_labels)
     return {p: probe.predict(f) for p, f in test_feats.items()}
 
@@ -215,7 +228,7 @@ def main():
     test = meta[meta['split'] == 'test']
     if args.limit:
         test = test.sample(min(args.limit, len(test)), random_state=0)
-    train = meta[(meta['split'] == 'train') & (meta['label'] < len(EXPRESSIONS))]
+    train = meta[meta['split'] == 'train']
     if len(train) > args.probe_train_max:
         train = train.sample(args.probe_train_max, random_state=0)
 
@@ -247,11 +260,11 @@ def main():
     summary = []
     for (dataset, protocol), group in [(('all', p), g) for p, g in per_image.groupby('protocol', sort=False)] + \
                                        list(per_image.groupby(['dataset', 'protocol'], sort=False)):
-        basic = group[group['label'] < len(EXPRESSIONS)]
         summary.append({'dataset': dataset, 'protocol': protocol, 'faces': len(group),
-                        **{m: float(group[m].mean()) for m in ['exp_dist', 'exp_rel', 'expr_mm', 'lmk_px']},
-                        'emotion_acc': float((basic['pred_label'] == basic['label']).mean()),
-                        'emotion_mean_class_acc': mean_class_accuracy(basic['label'].to_numpy(), basic['pred_label'].to_numpy())})
+                        **{m: float(group[m].mean()) for m in METRICS},
+                        'emotion_classes': group['label'].nunique(),
+                        'emotion_acc': float((group['pred_label'] == group['label']).mean()),
+                        'emotion_mean_class_acc': mean_class_accuracy(group['label'].to_numpy(), group['pred_label'].to_numpy())})
     summary = pd.DataFrame(summary)
 
     os.makedirs(args.out_dir, exist_ok=True)

@@ -61,7 +61,9 @@ Script: `extract_mediapipe_landmarks.py`, `compute_face_quality.py`, `filter_and
 - Chỉ số (script [`src/evaluation/occlusion_benchmark.py`](../src/evaluation/occlusion_benchmark.py)):
   `exp_dist` / `exp_rel` (sai lệch tham số biểu cảm so với ảnh sạch), `expr_mm` (sai lệch mesh biểu cảm, mm),
   `lmk_px` (lỗi landmark so với landmark MediaPipe của ảnh sạch, pixel trong ảnh 224),
-  `emotion_mean_class_acc` (bộ phân loại logistic regression train trên ảnh sạch của tập train, 7 cảm xúc).
+  `exp_scale` (‖ψ bị che‖ / ‖ψ sạch‖, > 1 nghĩa là biểu cảm bị phóng đại khi bị che, kiểm chứng nhận định ở mục 4.5 của bài báo),
+  `emotion_mean_class_acc` (bộ phân loại **MLP** như giao thức EMOCA/SMIRK, train trên ảnh sạch của tập train,
+  8 lớp với AffectNet, 7 lớp với ExpW / RAF-DB).
 - Cùng script này sẽ dùng lại để đánh giá các mô hình huấn luyện ở giai đoạn 05 (chỉ đổi `--checkpoint`).
 
 ## Lưu ý chung
