@@ -267,6 +267,13 @@ def main():
                         'emotion_mean_class_acc': mean_class_accuracy(group['label'].to_numpy(), group['pred_label'].to_numpy())})
     summary = pd.DataFrame(summary)
 
+    # change of every paper-style score with respect to the clean images of the same dataset
+    clean = summary[summary['protocol'] == 'clean'].set_index('dataset')
+    for column in ['emotion_acc', 'emotion_mean_class_acc', 'lmk_px']:
+        reference = summary['dataset'].map(clean[column])
+        summary[f'{column}_change'] = summary[column] - reference
+        summary[f'{column}_change_pct'] = 100 * (summary[column] - reference) / reference
+
     os.makedirs(args.out_dir, exist_ok=True)
     per_image.to_csv(os.path.join(args.out_dir, 'per_image.csv'), index=False)
     summary.to_csv(os.path.join(args.out_dir, 'summary.csv'), index=False)
