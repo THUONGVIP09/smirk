@@ -7,9 +7,9 @@ Script Python mà các notebook dùng nằm trong [`datasets/preprocess_scripts/
 (được chép vào notebook bằng các cell `%%writefile`) và trong [`src/`](../src/) (notebook giai đoạn 03 clone repo từ GitHub).
 
 ```
-01_data_preparation  →  02_data_cleaning  →  03_smirk_setup  →  (04 đánh giá baseline, 05 huấn luyện: sắp làm)
- crop / chuẩn hóa        landmark + lọc        cài SMIRK, demo,
- ảnh 256x256 + nhãn      + chia train/val/test  che khuất nhân tạo
+01_data_preparation  →  02_data_cleaning  →  03_smirk_setup  →  04_baseline_evaluation  →  (05 huấn luyện: sắp làm)
+ crop / chuẩn hóa        landmark + lọc        cài SMIRK, demo,     SMIRK_em1 trên ảnh sạch
+ ảnh 256x256 + nhãn      + chia train/val/test  che khuất nhân tạo   vs ảnh bị che (số liệu)
 ```
 
 ## 01_data_preparation: chuẩn hóa dữ liệu
@@ -50,6 +50,19 @@ Script: `extract_mediapipe_landmarks.py`, `compute_face_quality.py`, `filter_and
 - Code SMIRK được clone từ GitHub: **phải push code trước** khi chạy, nếu có sửa trong `src/`.
 - Module che khuất: [`src/utils/occlusion.py`](../src/utils/occlusion.py) (che ngẫu nhiên miệng / mắt / lông mày / mũi;
   hình dạng, kích thước, màu sắc ngẫu nhiên; `occlusion_rng(tên_ảnh)` cho tập test cố định).
+
+## 04_baseline_evaluation: đánh giá SMIRK gốc khi bị che khuất
+
+| Notebook | Làm gì | Input | Output |
+|---|---|---|---|
+| `kaggle_baseline_evaluation.ipynb` | Chạy `SMIRK_em1.pt` trên **toàn bộ ảnh test**, mỗi ảnh ở 6 kịch bản: `clean`, `random` (1–2 bộ phận ngẫu nhiên), và che đúng `mouth` / `eyes` / `brows` / `nose` (cố định theo tên ảnh) | `clean-faces` (+ `clean-faces-rafdb`), `expw-crops`, `affectnet-crops` (+ `rafdb-crops`) | `baseline_smirk_em1/`: `summary.csv`, `per_image.csv`, `features.npz`, `config.json` |
+
+- Cài đặt: **GPU T4 ×1**, Internet On, Secrets FLAME. **Không cần PyTorch3D** (không render).
+- Chỉ số (script [`src/evaluation/occlusion_benchmark.py`](../src/evaluation/occlusion_benchmark.py)):
+  `exp_dist` / `exp_rel` (sai lệch tham số biểu cảm so với ảnh sạch), `expr_mm` (sai lệch mesh biểu cảm, mm),
+  `lmk_px` (lỗi landmark so với landmark MediaPipe của ảnh sạch, pixel trong ảnh 224),
+  `emotion_mean_class_acc` (bộ phân loại logistic regression train trên ảnh sạch của tập train, 7 cảm xúc).
+- Cùng script này sẽ dùng lại để đánh giá các mô hình huấn luyện ở giai đoạn 05 (chỉ đổi `--checkpoint`).
 
 ## Lưu ý chung
 
