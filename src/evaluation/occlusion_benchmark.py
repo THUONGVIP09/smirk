@@ -15,6 +15,14 @@ Metrics (per test face and protocol):
     expr_mm    mean per-vertex distance (mm) between the FLAME meshes built from the clean / occluded expression, jaw and
                eyelid parameters, with the clean shape and a neutral pose (so that pose / camera changes do not count)
     occluded_area  fraction of the face (convex hull of the 478 MediaPipe landmarks) covered by the occluders
+    expr_mm_visible / expr_mm_occluded
+               expr_mm over the face vertices that are visible / under the occluders (vertices of the clean-image mesh
+               projected into the crop and looked up in the occlusion mask); expr_mm_visible is the error that the
+               occlusion causes on the parts that are NOT occluded
+    expr_mm_eyes / _forehead / _nose / _mouth / _cheeks
+               expr_mm per FLAME face region (eye_region incl. eyebrows, forehead, nose, lips, rest of the face)
+    lmk_px_visible / lmk_px_occluded
+               lmk_px over the landmarks that are visible / under the occluders
     lmk_px     mean distance (pixels of the 224 crop) between the projected FLAME MediaPipe landmarks and the
                MediaPipe landmarks of the clean image (the training targets of SMIRK)
 Emotion probe (as the EMOCA / SMIRK protocol: an MLP on the predicted parameters): MLP on [expression, jaw, eyelid]
@@ -53,7 +61,9 @@ SMIRK_MEDIAPIPE_INDICES = [276, 282, 283, 285, 293, 295, 296, 300, 334, 336, 46,
 PARTS = ['mouth', 'eyes', 'brows', 'nose']
 COVERED_GROUPS = {'mouth': ['mouth'], 'eyes': ['left_eye', 'right_eye'], 'brows': ['left_brow', 'right_brow'], 'nose': ['nose']}
 CROP_SIZE = 224
-METRICS = ['occluded_area', 'exp_dist', 'exp_rel', 'exp_scale', 'expr_mm', 'lmk_px']
+REGIONS = ['eyes', 'forehead', 'nose', 'mouth', 'cheeks']
+METRICS = ['occluded_area', 'exp_dist', 'exp_rel', 'exp_scale', 'expr_mm', 'expr_mm_visible', 'expr_mm_occluded'] + \
+          [f'expr_mm_{r}' for r in REGIONS] + ['lmk_px', 'lmk_px_visible', 'lmk_px_occluded']
 
 
 def crop_matrix(landmarks, scale, size=CROP_SIZE):
@@ -87,11 +97,12 @@ class FaceCrops(torch.utils.data.Dataset):
         landmarks = self.landmarks[key][:, :2]
         M = crop_matrix(landmarks, self.scale)
 
-        crops, covered, area = [cv2.warpAffine(image, M, (CROP_SIZE, CROP_SIZE), borderValue=0)], [], []
+        crops, covered, area, masks = [cv2.warpAffine(image, M, (CROP_SIZE, CROP_SIZE), borderValue=0)], [], [], []
         for p, protocol in enumerate(self.protocols):
-            occluded, _, info = self.occluder(image, landmarks, rng=occlusion_rng(key, seed=p),
-                                              parts=None if protocol == 'random' else [protocol])
+            occluded, mask, info = self.occluder(image, landmarks, rng=occlusion_rng(key, seed=p),
+                                                 parts=None if protocol == 'random' else [protocol])
             crops.append(cv2.warpAffine(occluded, M, (CROP_SIZE, CROP_SIZE), borderValue=0))
+            masks.append(cv2.warpAffine(mask, M, (CROP_SIZE, CROP_SIZE), borderValue=0) > 0.5)
             covered.append([max(info['covered'][g] for g in COVERED_GROUPS[part]) for part in PARTS])
             area.append(info['area'])
 
@@ -100,6 +111,7 @@ class FaceCrops(torch.utils.data.Dataset):
                 'target': torch.from_numpy(target / CROP_SIZE * 2 - 1).float(),   # 105 x 2, in [-1, 1]
                 'covered': torch.tensor(np.array(covered, dtype=np.float32).reshape(len(self.protocols), len(PARTS))),
                 'area': torch.tensor(np.array(area, dtype=np.float32).reshape(len(self.protocols))),
+                'masks': torch.from_numpy(np.array(masks, dtype=bool).reshape(len(self.protocols), CROP_SIZE, CROP_SIZE)),
                 'index': i}
 
 
@@ -127,11 +139,46 @@ def expression_vertices(flame, shape, outputs):
     return flame.forward(params)['vertices']
 
 
+def face_regions(device, path='assets/FLAME_masks/FLAME_masks.pkl'):
+    """Vertex indices of the FLAME face and of its regions (cheeks = face minus the other regions)."""
+    import pickle
+    with open(path, 'rb') as f:
+        masks = pickle.load(f, encoding='latin1')
+    face = set(masks['face'].tolist())
+    regions = {'eyes': set(masks['eye_region'].tolist()), 'forehead': set(masks['forehead'].tolist()),
+               'nose': set(masks['nose'].tolist()) & face, 'mouth': set(masks['lips'].tolist())}
+    regions['cheeks'] = face - set().union(*regions.values())
+    as_tensor = lambda vertices: torch.tensor(sorted(vertices), device=device)
+    return as_tensor(face), {name: as_tensor(v) for name, v in regions.items()}
+
+
+@torch.no_grad()
+def project_vertices(flame, outputs):
+    """Pixel coordinates (in the crop) of the posed FLAME vertices."""
+    projected = batch_orth_proj(flame.forward(outputs)['vertices'], outputs['cam'])
+    projected[:, :, 1:] = -projected[:, :, 1:]
+    return (projected[..., :2] + 1) / 2 * CROP_SIZE
+
+
+def lookup(masks, points):
+    """masks: N x H x W bool, points: N x K x 2 pixel coordinates -> N x K bool (outside the crop = not occluded)."""
+    x, y = points[..., 0].round().long(), points[..., 1].round().long()
+    inside = (x >= 0) & (x < CROP_SIZE) & (y >= 0) & (y < CROP_SIZE)
+    rows = torch.arange(masks.shape[0], device=masks.device)[:, None].expand_as(x)
+    return masks[rows, y.clamp(0, CROP_SIZE - 1), x.clamp(0, CROP_SIZE - 1)] & inside
+
+
+def masked_mean(values, keep):
+    """Mean of values over keep (N x K) per row, NaN where nothing is kept."""
+    count = keep.sum(-1)
+    return torch.where(count > 0, (values * keep).sum(-1) / count.clamp(min=1), torch.full_like(count, float('nan'), dtype=values.dtype))
+
+
 def features_of(outputs):
     return torch.cat([outputs['expression_params'], outputs['jaw_params'], outputs['eyelid_params']], dim=1).cpu().numpy()
 
 
-def run_test(encoder, flame, loader, protocols, device):
+def run_test(encoder, flame, loader, protocols, device, face, regions):
     """Predictions and metrics of every test face for the clean image and every occlusion protocol."""
     names = ['clean'] + protocols
     n = len(loader.dataset)
@@ -151,11 +198,17 @@ def run_test(encoder, flame, loader, protocols, device):
 
         clean = {k: v[:, 0] for k, v in outputs.items()}
         clean_vertices = expression_vertices(flame, clean['shape_params'], clean)
+        clean_pixels = project_vertices(flame, clean)[:, face]          # where every face vertex is in the crop
+        target_pixels = (target + 1) / 2 * CROP_SIZE
+        masks = batch['masks'].to(device)
         for j, protocol in enumerate(names):
             out = {k: v[:, j] for k, v in outputs.items()}
             feats[protocol][idx] = features_of(out)
-            lmk_px = (landmarks[:, j] - target).norm(dim=-1).mean(-1) * CROP_SIZE / 2
-            metrics[protocol]['lmk_px'][idx] = lmk_px.cpu().numpy()
+            lmk_dist = (landmarks[:, j] - target).norm(dim=-1) * CROP_SIZE / 2
+            metrics[protocol]['lmk_px'][idx] = lmk_dist.mean(-1).cpu().numpy()
+            lmk_hidden = lookup(masks[:, j - 1], target_pixels) if j > 0 else torch.zeros_like(lmk_dist, dtype=torch.bool)
+            metrics[protocol]['lmk_px_visible'][idx] = masked_mean(lmk_dist, ~lmk_hidden).cpu().numpy()
+            metrics[protocol]['lmk_px_occluded'][idx] = masked_mean(lmk_dist, lmk_hidden).cpu().numpy()
             metrics[protocol]['occluded_area'][idx] = batch['area'][:, j - 1].numpy() if j > 0 else 0.0
             if j == 0:
                 continue
@@ -165,7 +218,13 @@ def run_test(encoder, flame, loader, protocols, device):
             metrics[protocol]['exp_rel'][idx] = (dist / clean_norm).cpu().numpy()
             metrics[protocol]['exp_scale'][idx] = (out['expression_params'].norm(dim=1) / clean_norm).cpu().numpy()
             vertices = expression_vertices(flame, clean['shape_params'], out)
-            metrics[protocol]['expr_mm'][idx] = ((vertices - clean_vertices).norm(dim=-1).mean(-1) * 1000).cpu().numpy()
+            vertex_mm = (vertices - clean_vertices).norm(dim=-1) * 1000
+            metrics[protocol]['expr_mm'][idx] = vertex_mm.mean(-1).cpu().numpy()
+            face_mm, hidden = vertex_mm[:, face], lookup(masks[:, j - 1], clean_pixels)
+            metrics[protocol]['expr_mm_visible'][idx] = masked_mean(face_mm, ~hidden).cpu().numpy()
+            metrics[protocol]['expr_mm_occluded'][idx] = masked_mean(face_mm, hidden).cpu().numpy()
+            for name, vertex_ids in regions.items():
+                metrics[protocol][f'expr_mm_{name}'][idx] = vertex_mm[:, vertex_ids].mean(-1).cpu().numpy()
     return feats, metrics, covered
 
 
@@ -242,7 +301,8 @@ def main():
         FaceCrops(rows, image_dirs, landmarks, protocols, args.scale), batch_size=args.batch_size,
         num_workers=args.num_workers, shuffle=False)
 
-    test_feats, metrics, covered = run_test(encoder, flame, loader(test, protocols), protocols, args.device)
+    face, regions = face_regions(args.device)
+    test_feats, metrics, covered = run_test(encoder, flame, loader(test, protocols), protocols, args.device, face, regions)
     train_feats = run_features(encoder, flame, loader(train, []), args.device)
     predictions = emotion_probe(train_feats, train['label'].to_numpy(), test_feats)
 
