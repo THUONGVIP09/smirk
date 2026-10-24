@@ -4,6 +4,8 @@ Occlusion benchmark for SMIRK encoders: how much do the predictions change when 
 Every test face is evaluated clean and under synthetic occlusions (src/utils/occlusion.py, fixed per image):
     random              1-2 random parts
     mouth/eyes/brows/nose  exactly this part
+    lower_face          lower nose, mouth and chin (like a face mask or a hand over the mouth)
+    upper_face          both eyes and eyebrows (like sunglasses)
 The occluder is drawn on the full face crop with the landmarks of the clean image, then the same SMIRK crop
 (BaseDataset.crop_face, --scale) is used for the clean and the occluded image.
 
@@ -46,7 +48,7 @@ from tqdm import tqdm
 from src.smirk_encoder import SmirkEncoder
 from src.FLAME.FLAME import FLAME
 from src.renderer.util import batch_orth_proj
-from src.utils.occlusion import FaceOccluder, occlusion_rng
+from src.utils.occlusion import FaceOccluder, occlusion_rng, PART_CHOICES
 
 # indices of the MediaPipe landmarks that SMIRK uses (same as mediapipe_indices in datasets/base_dataset.py)
 SMIRK_MEDIAPIPE_INDICES = [276, 282, 283, 285, 293, 295, 296, 300, 334, 336, 46, 52, 53,
@@ -266,7 +268,8 @@ def main():
     parser.add_argument('--image_dir', action='append', required=True, help='dataset=folder with the crop images (repeatable)')
     parser.add_argument('--checkpoint', required=True, help='SMIRK checkpoint (keys smirk_encoder.*)')
     parser.add_argument('--out_dir', required=True)
-    parser.add_argument('--protocols', default='random,mouth,eyes,brows,nose')
+    # new protocols are appended: the seed of a protocol is its position, so the earlier ones stay identical
+    parser.add_argument('--protocols', default='random,mouth,eyes,brows,nose,lower_face,upper_face')
     parser.add_argument('--scale', type=float, default=1.6, help='SMIRK crop scale (test scale of the configs)')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=4)
@@ -276,7 +279,7 @@ def main():
     args = parser.parse_args()
 
     protocols = [p for p in args.protocols.split(',') if p]
-    assert all(p == 'random' or p in PARTS for p in protocols), f'protocols must be random or one of {PARTS}'
+    assert all(p == 'random' or p in PART_CHOICES for p in protocols), f'protocols must be random or one of {list(PART_CHOICES)}'
     image_dirs = dict(spec.split('=', 1) for spec in args.image_dir)
 
     metas, landmarks = [], {}

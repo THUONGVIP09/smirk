@@ -26,6 +26,8 @@ PART_LANDMARKS = {
     'right_brow': [46, 53, 52, 65, 55, 70, 63, 105, 66, 107],
     'nose': [168, 6, 197, 195, 5, 4, 1, 19, 94, 2, 98, 327, 129, 358, 49, 279, 64, 294],
     'mouth': [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185],
+    # lower nose, mouth and chin / lower jaw line: face masks, hands over the mouth
+    'lower_face': [1, 2, 98, 327, 129, 358, 61, 291, 0, 17, 152, 148, 176, 149, 150, 136, 377, 400, 378, 379, 365],
 }
 
 # parts that can be chosen, and the landmark groups each choice covers
@@ -34,6 +36,10 @@ PART_CHOICES = {
     'eyes': [['left_eye'], ['right_eye'], ['left_eye', 'right_eye']],
     'brows': [['left_brow'], ['right_brow'], ['left_brow', 'right_brow']],
     'nose': [['nose']],
+    # large regions, like real occluders (face masks / hands over the mouth, sunglasses / fringes over the eyes);
+    # not in the default parts of FaceOccluder, so the occlusions of the evaluation protocols are unchanged
+    'lower_face': [['lower_face']],
+    'upper_face': [['left_eye', 'right_eye', 'left_brow', 'right_brow']],
 }
 
 SHAPES = ['ellipse', 'rectangle', 'polygon', 'blob', 'bar']

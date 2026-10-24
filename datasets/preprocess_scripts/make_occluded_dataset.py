@@ -6,6 +6,9 @@ The occluders are drawn on the 256x256 face crops with the MediaPipe landmarks o
 landmarks.npz of the cleaning step), so every occluded image is pixel-aligned with its clean image: the same SMIRK
 crop / augmentation can be applied to both, and the clean image and landmarks stay the training targets.
 
+Besides single parts (mouth, eyes, brows, nose), large regions are drawn by default (lower_face: like a face mask or a
+hand over the mouth; upper_face: like sunglasses), so that the occluded face area resembles real occlusions.
+
 Train faces get --train_variants different occlusions, val / test faces --eval_variants. Seeds are fixed per image and
 variant (and differ from the seeds of the evaluation benchmark), so the dataset can be regenerated identically.
 
@@ -31,10 +34,11 @@ SEED_OFFSET = 1000  # the evaluation benchmark uses seeds 0..5
 worker = {}
 
 
-def init_worker(image_dir, texture_paths, jpeg_quality):
+def init_worker(image_dir, texture_paths, jpeg_quality, parts, scale_range):
     textures = [cv2.imread(p)[..., ::-1] for p in texture_paths]
     worker.update(image_dir=image_dir, jpeg_quality=jpeg_quality,
-                  occluder=FaceOccluder(texture_pool=[t for t in textures if t is not None]))
+                  occluder=FaceOccluder(parts=parts, scale_range=scale_range,
+                                        texture_pool=[t for t in textures if t is not None]))
 
 
 def occlude(job):
@@ -58,6 +62,10 @@ def main():
     parser.add_argument('--out_dir', required=True)
     parser.add_argument('--train_variants', type=int, default=2, help='Different occlusions per train face')
     parser.add_argument('--eval_variants', type=int, default=1, help='Different occlusions per val / test face')
+    parser.add_argument('--parts', default='mouth,eyes,brows,nose,lower_face,upper_face',
+                        help='Occluded parts / regions to draw from (keys of PART_CHOICES in src/utils/occlusion.py)')
+    parser.add_argument('--scale_min', type=float, default=0.8, help='Occluder size relative to the part, minimum')
+    parser.add_argument('--scale_max', type=float, default=1.8, help='Occluder size relative to the part, maximum')
     parser.add_argument('--jpeg_quality', type=int, default=95)
     parser.add_argument('--textures', type=int, default=300, help='Clean faces used as source of image-texture occluders')
     parser.add_argument('--preview', type=int, default=48, help='Occluded images also written as plain files')
@@ -93,7 +101,9 @@ def main():
               [f'covered_{p}' for p in PARTS] + ['occluded_area', 'image_offset', 'image_length', 'mask_offset', 'mask_length']
     out_rows, missing = [], 0
     with open(os.path.join(args.out_dir, 'images.bin'), 'wb') as fi, open(os.path.join(args.out_dir, 'masks.bin'), 'wb') as fm, \
-            Pool(args.num_processes, initializer=init_worker, initargs=(args.image_dir, texture_paths, args.jpeg_quality)) as workers:
+            Pool(args.num_processes, initializer=init_worker,
+                 initargs=(args.image_dir, texture_paths, args.jpeg_quality, args.parts.split(','),
+                           (args.scale_min, args.scale_max))) as workers:
         for job, result in tqdm(workers.imap(occlude, jobs, chunksize=32), total=len(jobs)):
             dataset, name, variant, _ = job
             if result is None:

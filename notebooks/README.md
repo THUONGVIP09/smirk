@@ -65,13 +65,14 @@ Script: `extract_mediapipe_landmarks.py`, `compute_face_quality.py`, `filter_and
   `exp_scale` (‖ψ bị che‖ / ‖ψ sạch‖, > 1 nghĩa là biểu cảm bị phóng đại khi bị che, kiểm chứng nhận định ở mục 4.5 của bài báo),
   `emotion_mean_class_acc` (bộ phân loại **MLP** như giao thức EMOCA/SMIRK, train trên ảnh sạch của tập train,
   8 lớp với AffectNet, 7 lớp với ExpW / RAF-DB).
+- Kịch bản đánh giá: `clean`, `random`, `mouth`, `eyes`, `brows`, `nose`, `lower_face`, `upper_face` (2 kịch bản cuối thêm sau, không làm đổi các kịch bản trước).
 - Cùng script này sẽ dùng lại để đánh giá các mô hình huấn luyện ở giai đoạn 05 (chỉ đổi `--checkpoint`).
 
 ## 05_occluded_datasets: tạo sẵn bộ ảnh bị che cho từng dataset
 
 | Notebook | Làm gì | Input | Output → Dataset |
 |---|---|---|---|
-| `kaggle_make_occluded_dataset.ipynb` | Che khuất nhân tạo mọi ảnh sạch (ảnh train 2 phiên bản che, val/test 1), che trên ảnh 256×256 bằng landmark của ảnh sạch nên **khớp từng pixel** với ảnh sạch | **chạy riêng từng dataset**: `clean-faces` + `expw-crops` / `clean-faces` + `affectnet_1` / `clean-faces-rafdb` + `rafdb-crops` | `occluded-expw` / `occluded-affectnet` / `occluded-rafdb` |
+| `kaggle_make_occluded_dataset.ipynb` | Che khuất nhân tạo mọi ảnh sạch (ảnh train 2 phiên bản che, val/test 1): từng bộ phận (miệng, mắt, lông mày, mũi) và **vùng lớn** (`lower_face`: nửa dưới mặt như khẩu trang / tay che miệng; `upper_face`: hai mắt và lông mày như kính râm), che trên ảnh 256×256 bằng landmark của ảnh sạch nên **khớp từng pixel** với ảnh sạch | **chạy riêng từng dataset**: `clean-faces` + `expw-crops` / `clean-faces` + `affectnet_1` / `clean-faces-rafdb` + `rafdb-crops` | `occluded-expw` / `occluded-affectnet` / `occluded-rafdb` |
 
 - Cài đặt: **Accelerator None** (chỉ CPU), Internet On.
 - Output: `occluded_meta.csv` (bộ phận, hình dạng, kiểu màu, tỉ lệ che từng bộ phận, **`occluded_area`** = tỉ lệ diện tích
