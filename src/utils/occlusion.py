@@ -9,7 +9,8 @@ Usage:
     occluder = FaceOccluder()
     occluded, mask, info = occluder(image, landmarks, rng=np.random.default_rng(seed))
     # image: HxWx3 uint8 RGB, landmarks: 478x2 (or 478x3) pixel coordinates in the same image
-    # mask: HxW float32 in [0, 1] (1 = occluded), info: parts / shapes / fills and the covered fraction of every part
+    # mask: HxW float32 in [0, 1] (1 = occluded), info: parts / shapes / fills, the covered fraction of every part and
+    # 'area': the occluded fraction of the face (convex hull of all the landmarks)
 
 For a test set, use occlusion_rng(name) so that every image always gets the same occlusion.
 """
@@ -109,6 +110,14 @@ def _fill(fill, height, width, rng, image, texture_pool):
     raise ValueError(f'unknown fill {fill}')
 
 
+def occluded_face_area(mask, landmarks):
+    """Fraction of the face (convex hull of the landmarks, i.e. the face oval for MediaPipe) covered by the mask."""
+    face = np.zeros(mask.shape, np.uint8)
+    cv2.fillConvexPoly(face, cv2.convexHull(np.round(np.asarray(landmarks)[:, :2]).astype(np.int32)), 1)
+    face = face.astype(bool)
+    return float(mask[face].mean()) if face.any() else 0.0
+
+
 class FaceOccluder:
     def __init__(self, parts=('mouth', 'eyes', 'brows', 'nose'), max_parts=2, shapes=SHAPES, fills=FILLS,
                  scale_range=(0.8, 1.8), jitter=0.25, feather=1.5, texture_pool=None):
@@ -177,4 +186,5 @@ class FaceOccluder:
         inside = total_mask[np.clip(np.round(landmarks[:, 1]).astype(int), 0, height - 1),
                             np.clip(np.round(landmarks[:, 0]).astype(int), 0, width - 1)] > 0.5
         info['covered'] = {g: float(inside[idx].mean()) for g, idx in PART_LANDMARKS.items()}
+        info['area'] = occluded_face_area(total_mask, landmarks)
         return np.clip(out, 0, 255).astype(np.uint8), total_mask, info

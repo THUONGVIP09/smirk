@@ -1,15 +1,15 @@
 # Notebooks Kaggle của dự án (theo từng giai đoạn)
 
-Tất cả notebook được chạy trên **Kaggle** (máy cá nhân không đủ GPU). Chạy theo thứ tự thư mục `01 → 02 → 03`.
+Tất cả notebook được chạy trên **Kaggle** (máy cá nhân không đủ GPU). Chạy theo thứ tự thư mục `01 → 02 → 03 → 04 → 05`.
 Đầu ra của mỗi notebook được lưu thành **Kaggle Dataset (Private)** để notebook sau dùng làm Input.
 
 Script Python mà các notebook dùng nằm trong [`datasets/preprocess_scripts/`](../datasets/preprocess_scripts/)
 (được chép vào notebook bằng các cell `%%writefile`) và trong [`src/`](../src/) (notebook giai đoạn 03 clone repo từ GitHub).
 
 ```
-01_data_preparation  →  02_data_cleaning  →  03_smirk_setup  →  04_baseline_evaluation  →  (05 huấn luyện: sắp làm)
- crop / chuẩn hóa        landmark + lọc        cài SMIRK, demo,     SMIRK_em1 trên ảnh sạch
- ảnh 256x256 + nhãn      + chia train/val/test  che khuất nhân tạo   vs ảnh bị che (số liệu)
+01_data_preparation → 02_data_cleaning → 03_smirk_setup → 04_baseline_evaluation → 05_occluded_datasets → (06 huấn luyện)
+ crop / chuẩn hóa       landmark + lọc       cài SMIRK, demo,    SMIRK_em1 trên ảnh sạch  ảnh bị che tạo sẵn
+ ảnh 256x256 + nhãn     + chia dữ liệu       che khuất           vs ảnh bị che (số liệu)  cho từng dataset
 ```
 
 ## 01_data_preparation: chuẩn hóa dữ liệu
@@ -61,10 +61,25 @@ Script: `extract_mediapipe_landmarks.py`, `compute_face_quality.py`, `filter_and
 - Chỉ số (script [`src/evaluation/occlusion_benchmark.py`](../src/evaluation/occlusion_benchmark.py)):
   `exp_dist` / `exp_rel` (sai lệch tham số biểu cảm so với ảnh sạch), `expr_mm` (sai lệch mesh biểu cảm, mm),
   `lmk_px` (lỗi landmark so với landmark MediaPipe của ảnh sạch, pixel trong ảnh 224),
+  `occluded_area` (tỉ lệ diện tích khuôn mặt bị che),
   `exp_scale` (‖ψ bị che‖ / ‖ψ sạch‖, > 1 nghĩa là biểu cảm bị phóng đại khi bị che, kiểm chứng nhận định ở mục 4.5 của bài báo),
   `emotion_mean_class_acc` (bộ phân loại **MLP** như giao thức EMOCA/SMIRK, train trên ảnh sạch của tập train,
   8 lớp với AffectNet, 7 lớp với ExpW / RAF-DB).
 - Cùng script này sẽ dùng lại để đánh giá các mô hình huấn luyện ở giai đoạn 05 (chỉ đổi `--checkpoint`).
+
+## 05_occluded_datasets: tạo sẵn bộ ảnh bị che cho từng dataset
+
+| Notebook | Làm gì | Input | Output → Dataset |
+|---|---|---|---|
+| `kaggle_make_occluded_dataset.ipynb` | Che khuất nhân tạo mọi ảnh sạch (ảnh train 2 phiên bản che, val/test 1), che trên ảnh 256×256 bằng landmark của ảnh sạch nên **khớp từng pixel** với ảnh sạch | **chạy riêng từng dataset**: `clean-faces` + `expw-crops` / `clean-faces` + `affectnet_1` / `clean-faces-rafdb` + `rafdb-crops` | `occluded-expw` / `occluded-affectnet` / `occluded-rafdb` |
+
+- Cài đặt: **Accelerator None** (chỉ CPU), Internet On.
+- Output: `occluded_meta.csv` (bộ phận, hình dạng, kiểu màu, tỉ lệ che từng bộ phận, **`occluded_area`** = tỉ lệ diện tích
+  khuôn mặt bị che), `images.bin` (ảnh JPEG gộp), `masks.bin` (mask PNG gộp), `preview/` (ảnh mẫu).
+  Gộp thành vài file lớn để Kaggle tạo dataset không bị lỗi khi có hàng chục nghìn file.
+- Đọc khi train: [`src/utils/occluded_store.py`](../src/utils/occluded_store.py) (`OccludedStore(folder).get(dataset, name, variant)`).
+- Script: [`make_occluded_dataset.py`](../datasets/preprocess_scripts/make_occluded_dataset.py). Seed cố định theo ảnh và
+  phiên bản, khác seed của bộ đánh giá: tạo lại sẽ ra đúng các ảnh cũ.
 
 ## Lưu ý chung
 

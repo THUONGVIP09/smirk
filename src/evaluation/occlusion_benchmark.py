@@ -14,6 +14,7 @@ Metrics (per test face and protocol):
                Sec. 4.5, reports that the model "tends to assume more intense expressions" when parts are missing)
     expr_mm    mean per-vertex distance (mm) between the FLAME meshes built from the clean / occluded expression, jaw and
                eyelid parameters, with the clean shape and a neutral pose (so that pose / camera changes do not count)
+    occluded_area  fraction of the face (convex hull of the 478 MediaPipe landmarks) covered by the occluders
     lmk_px     mean distance (pixels of the 224 crop) between the projected FLAME MediaPipe landmarks and the
                MediaPipe landmarks of the clean image (the training targets of SMIRK)
 Emotion probe (as the EMOCA / SMIRK protocol: an MLP on the predicted parameters): MLP on [expression, jaw, eyelid]
@@ -52,7 +53,7 @@ SMIRK_MEDIAPIPE_INDICES = [276, 282, 283, 285, 293, 295, 296, 300, 334, 336, 46,
 PARTS = ['mouth', 'eyes', 'brows', 'nose']
 COVERED_GROUPS = {'mouth': ['mouth'], 'eyes': ['left_eye', 'right_eye'], 'brows': ['left_brow', 'right_brow'], 'nose': ['nose']}
 CROP_SIZE = 224
-METRICS = ['exp_dist', 'exp_rel', 'exp_scale', 'expr_mm', 'lmk_px']
+METRICS = ['occluded_area', 'exp_dist', 'exp_rel', 'exp_scale', 'expr_mm', 'lmk_px']
 
 
 def crop_matrix(landmarks, scale, size=CROP_SIZE):
@@ -86,17 +87,19 @@ class FaceCrops(torch.utils.data.Dataset):
         landmarks = self.landmarks[key][:, :2]
         M = crop_matrix(landmarks, self.scale)
 
-        crops, covered = [cv2.warpAffine(image, M, (CROP_SIZE, CROP_SIZE), borderValue=0)], []
+        crops, covered, area = [cv2.warpAffine(image, M, (CROP_SIZE, CROP_SIZE), borderValue=0)], [], []
         for p, protocol in enumerate(self.protocols):
             occluded, _, info = self.occluder(image, landmarks, rng=occlusion_rng(key, seed=p),
                                               parts=None if protocol == 'random' else [protocol])
             crops.append(cv2.warpAffine(occluded, M, (CROP_SIZE, CROP_SIZE), borderValue=0))
             covered.append([max(info['covered'][g] for g in COVERED_GROUPS[part]) for part in PARTS])
+            area.append(info['area'])
 
         target = landmarks[SMIRK_MEDIAPIPE_INDICES] @ M[:, :2].T + M[:, 2]
         return {'images': torch.from_numpy(np.stack(crops)).permute(0, 3, 1, 2),  # P x 3 x H x W, uint8
                 'target': torch.from_numpy(target / CROP_SIZE * 2 - 1).float(),   # 105 x 2, in [-1, 1]
                 'covered': torch.tensor(np.array(covered, dtype=np.float32).reshape(len(self.protocols), len(PARTS))),
+                'area': torch.tensor(np.array(area, dtype=np.float32).reshape(len(self.protocols))),
                 'index': i}
 
 
@@ -153,6 +156,7 @@ def run_test(encoder, flame, loader, protocols, device):
             feats[protocol][idx] = features_of(out)
             lmk_px = (landmarks[:, j] - target).norm(dim=-1).mean(-1) * CROP_SIZE / 2
             metrics[protocol]['lmk_px'][idx] = lmk_px.cpu().numpy()
+            metrics[protocol]['occluded_area'][idx] = batch['area'][:, j - 1].numpy() if j > 0 else 0.0
             if j == 0:
                 continue
             dist = (out['expression_params'] - clean['expression_params']).norm(dim=1)
