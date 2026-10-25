@@ -1,13 +1,13 @@
 # Notebooks Kaggle của dự án (theo từng giai đoạn)
 
-Tất cả notebook được chạy trên **Kaggle** (máy cá nhân không đủ GPU). Chạy theo thứ tự thư mục `01 → 02 → 03 → 04 → 05`.
+Tất cả notebook được chạy trên **Kaggle** (máy cá nhân không đủ GPU). Chạy theo thứ tự thư mục `01 → 02 → 03 → 04 → 05 → 06`.
 Đầu ra của mỗi notebook được lưu thành **Kaggle Dataset (Private)** để notebook sau dùng làm Input.
 
 Script Python mà các notebook dùng nằm trong [`datasets/preprocess_scripts/`](../datasets/preprocess_scripts/)
 (được chép vào notebook bằng các cell `%%writefile`) và trong [`src/`](../src/) (notebook giai đoạn 03 clone repo từ GitHub).
 
 ```
-01_data_preparation → 02_data_cleaning → 03_smirk_setup → 04_baseline_evaluation → 05_occluded_datasets → (06 huấn luyện)
+01_data_preparation → 02_data_cleaning → 03_smirk_setup → 04_baseline_evaluation → 05_occluded_datasets → 06_training
  crop / chuẩn hóa       landmark + lọc       cài SMIRK, demo,    SMIRK_em1 trên ảnh sạch  ảnh bị che tạo sẵn
  ảnh 256x256 + nhãn     + chia dữ liệu       che khuất           vs ảnh bị che (số liệu)  cho từng dataset
 ```
@@ -81,6 +81,22 @@ Script: `extract_mediapipe_landmarks.py`, `compute_face_quality.py`, `filter_and
 - Đọc khi train: [`src/utils/occluded_store.py`](../src/utils/occluded_store.py) (`OccludedStore(folder).get(dataset, name, variant)`).
 - Script: [`make_occluded_dataset.py`](../datasets/preprocess_scripts/make_occluded_dataset.py). Seed cố định theo ảnh và
   phiên bản, khác seed của bộ đánh giá: tạo lại sẽ ra đúng các ảnh cũ.
+
+## 06_training: huấn luyện SMIRK nhận biết che khuất
+
+| Notebook | Làm gì | Input | Output |
+|---|---|---|---|
+| `kaggle_train_occlusion.ipynb` | `MODE = 'transfer'` (backbone đóng băng, chỉ train lớp đầu ra) hoặc `'finetune'` (toàn bộ expression encoder + mạng sinh ảnh, có cycle path). `QUICK_TEST = True` chạy thử ~30 vòng | `flame2020`, `pytorch3d-wheel`, `clean-faces` (+ `clean-faces-rafdb`), các `*-crops`, các `occluded-*`, (tùy chọn) EMOCA `ResNet50` | `logs/<MODE>/`: `model_final.pt` (trọng số, cùng định dạng `SMIRK_em1.pt`), `checkpoint_last.pt` (để resume), ảnh minh họa |
+
+- Code: [`train_occlusion.py`](../train_occlusion.py), [`src/occlusion_trainer.py`](../src/occlusion_trainer.py),
+  [`datasets/occluded_face_dataset.py`](../datasets/occluded_face_dataset.py), cấu hình
+  [`config_occlusion_transfer.yaml`](../configs/config_occlusion_transfer.yaml), [`config_occlusion_finetune.yaml`](../configs/config_occlusion_finetune.yaml).
+- Thay đổi so với SMIRK: encoder nhận **ảnh bị che** (50%) hoặc ảnh sạch (50%); mọi đáp án lấy từ **ảnh sạch**;
+  landmark / pixel bị che có trọng số nhỏ (0,2); **loss bảo toàn vùng nhìn thấy** (`visible_consistency`): mesh biểu
+  cảm từ ảnh bị che phải trùng mesh của SMIRK gốc trên ảnh sạch ở các đỉnh **không bị che**; cycle path che thêm lên ảnh
+  sinh ra; bỏ ảnh che > 70%.
+- Kaggle dừng sau 12 giờ: checkpoint mỗi 500 vòng và trước 11 giờ. Chạy tiếp: gắn output lần trước làm Input.
+- Đánh giá đầy đủ: notebook 04 với `--checkpoint` là `model_final.pt`.
 
 ## Lưu ý chung
 

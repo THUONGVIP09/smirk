@@ -55,7 +55,7 @@ class BaseTrainer(nn.Module):
                                                                                   eta_min=0.01 * encoder_scale * self.config.train.lr)
 
         if self.config.arch.enable_fuse_generator:
-            if hasattr(self, 'fuse_generator_optimizer'):
+            if hasattr(self, 'smirk_generator_optimizer'):  # was 'fuse_generator_optimizer': recreated (Adam state lost) every epoch
                 for g in self.smirk_generator_optimizer.param_groups:
                     g['lr'] = self.config.train.lr
             else:

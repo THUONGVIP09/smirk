@@ -1,0 +1,74 @@
+# Occlusion-aware fine-tuning of the pretrained SMIRK (train_occlusion.py).
+# Starts from SMIRK_em1.pt; trains the whole expression encoder and the translator, with the cycle path.
+resume: pretrained_models/SMIRK_em1.pt   # initial weights (also the frozen teacher of the visible-region consistency)
+load_encoder: True
+load_fuse_generator: True
+resume_checkpoint:                        # checkpoint_last.pt of an interrupted run
+device: cuda:0
+image_size: 224
+K: 1
+
+train:
+  lr: 2e-4                  # the encoder uses 0.25 * lr (BaseTrainer.configure_optimizers)
+  num_epochs: 5
+  batch_size: 16
+  num_workers: 4
+  samples_per_epoch: 20000
+  log_path: logs/occlusion_finetune
+  log_losses_every: 50
+  visualize_every: 500
+  save_every: 1
+  save_every_iters: 500     # resumable checkpoint
+  time_limit_hours: 11.0    # stop (with a checkpoint) before Kaggle's 12 h limit
+  max_iters: 0              # > 0: stop after this many iterations (quick test)
+  val_batches: 50
+  mask_ratio: 0.01
+  mask_dilation_radius: 10
+  Ke: 1
+  use_base_model_for_regularization: True   # regularize towards the teacher on the clean image
+  resume_epoch: 0
+  train_scale_min: 1.2
+  train_scale_max: 1.8
+  test_scale: 1.6
+
+  loss_weights:
+    landmark_loss: 100.0
+    perceptual_vgg_loss: 10.0
+    reconstruction_loss: 10.0
+    emotion_loss: 1.0           # set to 0 when the EMOCA emotion network (assets/ResNet50) is not available
+    jaw_regularization: 1e-2
+    expression_regularization: 1e-3
+    shape_regularization: 100
+    cycle_loss: 1.0
+    mica_loss: 0
+    visible_consistency: 1.0    # expression mesh vs the teacher on the clean image, on the visible face vertices (mm)
+
+  optimize_pose: False
+  optimize_shape: False
+  optimize_expression: True
+  freeze_encoder_in_second_path: False
+  freeze_generator_in_second_path: False
+
+occlusion:
+  p_occluded: 0.5                     # share of occluded inputs (the rest are clean faces)
+  max_occluded_area: 0.7              # skip nearly fully occluded faces
+  landmark_weight_occluded: 0.2       # weight of occluded landmarks (visible = 1)
+  reconstruction_weight_occluded: 0.2 # weight of occluded pixels in the L1 reconstruction loss (visible = 1)
+  consistency_weight_occluded: 0.1    # weight of occluded vertices in the visible-region consistency (visible = 1)
+  cycle_occlusion: True               # occlude the translator output in the cycle path
+  freeze_backbone: False              # transfer learning: train only the expression head
+  optimize_generator: True
+
+arch:
+  backbone_pose: tf_mobilenetv3_small_minimal_100
+  backbone_shape: tf_mobilenetv3_large_minimal_100
+  backbone_expression: tf_mobilenetv3_large_minimal_100
+  num_expression: 50
+  num_shape: 300
+  use_eyelids: True
+  enable_fuse_generator: True
+
+data:            # filled from --paths paths.yaml
+  clean_dirs: []
+  image_dirs: {}
+  occluded_dirs: {}
