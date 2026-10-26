@@ -8,6 +8,7 @@ paths.yaml gives the data folders (written by the Kaggle notebook):
       clean_dirs: [.../clean_faces, ...]               clean_meta.csv + landmarks.npz
       image_dirs: {expw: .../images, affectnet: ...}   256x256 crops
       occluded_dirs: {expw: .../occluded_expw, ...}    occluded_meta.csv + images.bin + masks.bin
+      fan_files: {expw: .../expw_fan.npz, ...}         FAN landmarks (optional, extract_fan_landmarks.py)
 
 Kaggle sessions stop after 12 h: a checkpoint (model, optimizers, schedulers, position) is written every
 train.save_every_iters iterations and before train.time_limit_hours; restart with resume_checkpoint=<checkpoint_last.pt>.
@@ -43,7 +44,8 @@ def make_loader(config, split, samples=None, shuffle=True):
                                   split, image_size=config.image_size,
                                   train_scale=(config.train.train_scale_min, config.train.train_scale_max),
                                   test_scale=config.train.test_scale, p_occluded=config.occlusion.p_occluded,
-                                  max_occluded_area=config.occlusion.max_occluded_area)
+                                  max_occluded_area=config.occlusion.max_occluded_area,
+                                  fan_files=dict(config.data.get('fan_files') or {}))
     sampler = torch.utils.data.RandomSampler(dataset, num_samples=min(samples, len(dataset)) if samples else None) if shuffle else None
     return torch.utils.data.DataLoader(dataset, batch_size=config.train.batch_size, sampler=sampler, drop_last=True,
                                        num_workers=config.train.num_workers, pin_memory=True,

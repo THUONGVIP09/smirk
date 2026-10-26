@@ -48,12 +48,14 @@ class OcclusionTrainer(SmirkTrainer):
 
     def train(self, mode=True):
         super().train()
-        # modules that are not optimized keep their batch-norm statistics (SmirkTrainer.step re-enables gradients of
-        # the generator after the cycle path, so the freezing is applied again at every step)
-        if not self.config.train.optimize_pose:
-            self.smirk_encoder.pose_encoder.eval()
-        if not self.config.train.optimize_shape:
-            self.smirk_encoder.shape_encoder.eval()
+        # the original SMIRK training keeps the pose / shape encoders in train mode even when they are not optimized
+        # (their batch-norm statistics still change); occlusion.freeze_bn_not_optimized=True keeps them fixed instead
+        if self.occ.freeze_bn_not_optimized:
+            if not self.config.train.optimize_pose:
+                self.smirk_encoder.pose_encoder.eval()
+            if not self.config.train.optimize_shape:
+                self.smirk_encoder.shape_encoder.eval()
+        # SmirkTrainer.step re-enables gradients of the generator after the cycle path: freeze again at every step
         self.apply_freezing()
         return self
 

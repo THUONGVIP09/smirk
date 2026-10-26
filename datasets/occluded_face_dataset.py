@@ -12,9 +12,11 @@ Keys (as in BaseDataset.prepare_data, plus the occlusion ones):
     occlusion_mask       1 x S x S, 1 = occluded
     landmarks_mp         105 x 2 in [-1, 1], from the clean image
     landmarks_mp_visible 105, False where the landmark is under the occluder
-    landmarks_fan / flag_landmarks_fan   zeros / False (no FAN landmarks for these datasets)
+    landmarks_fan / flag_landmarks_fan   68 x 2 FAN landmarks in [-1, 1] of the clean image (extract_fan_landmarks.py)
+                         and whether they exist (zeros / False otherwise); SMIRK uses the 17 jaw-line points
     mask                 1 x S x S face hull mask, 0 inside the face (as in BaseDataset)
-    img_mica             3 x 112 x 112 ArcFace crop of the clean face (MICA loss, from-scratch pretraining)
+    img_mica             3 x 112 x 112 ArcFace crop of the clean face (MICA loss, from-scratch pretraining), aligned
+                         with 5 FAN points as BaseDataset (MediaPipe points when there are no FAN landmarks)
     is_occluded, occluded_area
 """
 import os
@@ -56,10 +58,14 @@ def crop_matrix(landmarks, scale, size):
     return cv2.getAffineTransform(src, dst)
 
 
-def mica_crop(image_rgb, landmarks):
-    """112x112 ArcFace-aligned crop for MICA, with the 5 points taken from the MediaPipe landmarks."""
-    points = np.stack([landmarks[IMAGE_LEFT_EYE].mean(0), landmarks[IMAGE_RIGHT_EYE].mean(0),
-                       landmarks[1], landmarks[61], landmarks[291]]).astype(np.float32)
+def mica_crop(image_rgb, landmarks, fan=None):
+    """112x112 ArcFace-aligned crop for MICA. As BaseDataset.prepare_data: eye centres, nose and mouth corners from the
+    FAN landmarks (36/39, 42/45, 32, 48, 54); the MediaPipe landmarks are used when there are no FAN landmarks."""
+    if fan is not None:
+        points = np.stack([(fan[36] + fan[39]) / 2, (fan[42] + fan[45]) / 2, fan[32], fan[48], fan[54]]).astype(np.float32)
+    else:
+        points = np.stack([landmarks[IMAGE_LEFT_EYE].mean(0), landmarks[IMAGE_RIGHT_EYE].mean(0),
+                           landmarks[1], landmarks[61], landmarks[291]]).astype(np.float32)
     M, _ = cv2.estimateAffinePartial2D(points, ARCFACE_DST)
     if M is None:
         M = np.float32([[112 / image_rgb.shape[1], 0, 0], [0, 112 / image_rgb.shape[0], 0]])
@@ -67,24 +73,39 @@ def mica_crop(image_rgb, landmarks):
 
 
 def build_augmentation():
-    """Photometric + geometric augmentation applied identically to the clean and the occluded image."""
+    """The augmentation of BaseDataset (original SMIRK training), applied identically to the clean and the occluded image.
+    Newer albumentations versions renamed / dropped some transforms: the closest equivalent is used then."""
     import albumentations as A
+    try:
+        geometric = A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, border_mode=0, p=0.9)
+    except Exception:
+        geometric = A.Affine(scale=(0.9, 1.1), translate_percent=(-0.05, 0.05), rotate=(-10, 10), p=0.9)
+    try:
+        noise = A.GaussNoise(p=0.5)
+    except Exception:
+        noise = A.NoOp()
     return A.Compose([
         A.RandomBrightnessContrast(p=0.5),
-        A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=15, val_shift_limit=10, p=0.3),
-        A.Affine(scale=(0.9, 1.1), translate_percent=(-0.05, 0.05), rotate=(-10, 10), p=0.9),
+        A.RandomGamma(p=0.5),
+        A.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05, p=0.25),
+        A.CLAHE(p=0.255),
+        A.RGBShift(p=0.25),
+        A.Blur(p=0.1),
+        noise,
+        geometric,
     ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
         additional_targets={'occluded': 'image', 'occ_mask': 'mask'})
 
 
 class OccludedFaceDataset(torch.utils.data.Dataset):
     def __init__(self, clean_dirs, image_dirs, occluded_dirs, split, image_size=224, train_scale=(1.2, 1.8),
-                 test_scale=1.6, p_occluded=0.5, max_occluded_area=0.7, augment=None):
+                 test_scale=1.6, p_occluded=0.5, max_occluded_area=0.7, augment=None, fan_files=None):
         """
         clean_dirs:    folders with clean_meta.csv and landmarks.npz (outputs of the cleaning step)
         image_dirs:    {dataset: folder with the 256x256 crops}
         occluded_dirs: {dataset: folder with occluded_meta.csv / images.bin / masks.bin}
         split:         'train', 'val' or 'test'
+        fan_files:     {dataset: .npz from extract_fan_landmarks.py} (optional)
         """
         self.split, self.image_size, self.p_occluded = split, image_size, p_occluded
         self.train = split == 'train'
@@ -109,6 +130,11 @@ class OccludedFaceDataset(torch.utils.data.Dataset):
                     keep.append(v)
             self.variants.append(keep)
 
+        self.fan = {}
+        for dataset, path in (fan_files or {}).items():
+            data = np.load(path)
+            self.fan.update({f'{dataset}/{n}': lmk for n, lmk, ok in zip(data['names'], data['landmarks'], data['detected']) if ok})
+
         self.augment = (build_augmentation() if self.train else None) if augment is None else augment
 
     def __len__(self):
@@ -119,6 +145,8 @@ class OccludedFaceDataset(torch.utils.data.Dataset):
         dataset, name = r['dataset'], r['name']
         clean = np.ascontiguousarray(cv2.imread(os.path.join(self.image_dirs[dataset], name + '.png'))[..., ::-1])
         landmarks = self.landmarks[f'{dataset}/{name}'][:, :2].astype(np.float32)
+        fan = self.fan.get(f'{dataset}/{name}')
+        fan = fan.astype(np.float32) if fan is not None else None
 
         # encoder input: a random occluded variant (train), or a fixed choice (val / test: every other face occluded)
         variants = self.variants[index]
@@ -146,13 +174,15 @@ class OccludedFaceDataset(torch.utils.data.Dataset):
         hull = np.ones(S, np.uint8)  # 1 outside the face, as create_mask in datasets/base_dataset.py
         cv2.fillConvexPoly(hull, cv2.convexHull(crop_landmarks.astype(np.int32)), 0)
         landmarks_mp = crop_landmarks[SMIRK_MEDIAPIPE_INDICES]
+        landmarks_fan = fan @ M[:, :2].T + M[:, 2] if fan is not None else np.zeros((68, 2), np.float32)
 
         if self.augment is not None:
             out = self.augment(image=clean_crop, occluded=occluded_crop, mask=1 - hull, occ_mask=occ_mask_crop,
-                               keypoints=landmarks_mp)
+                               keypoints=np.concatenate([landmarks_mp, landmarks_fan]))
             clean_crop, occluded_crop = out['image'], out['occluded']
             hull, occ_mask_crop = 1 - out['mask'], out['occ_mask']
-            landmarks_mp = np.array(out['keypoints'], dtype=np.float32).reshape(-1, 2)
+            keypoints = np.array(out['keypoints'], dtype=np.float32).reshape(-1, 2)
+            landmarks_mp, landmarks_fan = keypoints[:len(landmarks_mp)], keypoints[len(landmarks_mp):]
 
         # landmarks under the occluder (looked up in the occlusion mask)
         xy = np.round(landmarks_mp).astype(int)
@@ -167,10 +197,10 @@ class OccludedFaceDataset(torch.utils.data.Dataset):
             'occlusion_mask': torch.from_numpy(np.ascontiguousarray(occ_mask_crop)).float()[None],
             'landmarks_mp': torch.from_numpy(landmarks_mp / self.image_size * 2 - 1).float(),
             'landmarks_mp_visible': torch.from_numpy(~hidden),
-            'landmarks_fan': torch.zeros(68, 2),
-            'flag_landmarks_fan': False,
+            'landmarks_fan': torch.from_numpy(landmarks_fan / self.image_size * 2 - 1).float() if fan is not None else torch.zeros(68, 2),
+            'flag_landmarks_fan': fan is not None,
             'mask': torch.from_numpy(np.ascontiguousarray(hull)).float()[None],
-            'img_mica': torch.from_numpy(mica_crop(clean, landmarks).transpose(2, 0, 1).copy()),
+            'img_mica': torch.from_numpy(mica_crop(clean, landmarks, fan).transpose(2, 0, 1).copy()),
             'is_occluded': use_occluded,
             'occluded_area': area,
         }

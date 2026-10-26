@@ -59,6 +59,7 @@ occlusion:
   cycle_occlusion: False
   freeze_backbone: True               # transfer learning: train only the expression head
   optimize_generator: False
+  freeze_bn_not_optimized: False      # True: batch-norm statistics of the not optimized pose / shape encoders stay fixed (the original SMIRK lets them change)
 
 arch:
   backbone_pose: tf_mobilenetv3_small_minimal_100
@@ -73,3 +74,4 @@ data:            # filled from --paths paths.yaml
   clean_dirs: []
   image_dirs: {}
   occluded_dirs: {}
+  fan_files: {}    # {dataset: .npz from extract_fan_landmarks.py}, optional

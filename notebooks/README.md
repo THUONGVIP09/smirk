@@ -40,6 +40,12 @@ Script: `crop_expw.py`, `prepare_affectnet.py`, `prepare_rafdb.py`. Cài đặt 
 
 Script: `extract_mediapipe_landmarks.py`, `compute_face_quality.py`, `filter_and_split.py`.
 
+| Notebook | Làm gì | Input | Output → Dataset |
+|---|---|---|---|
+| `kaggle_fan_landmarks.ipynb` | Landmark **FAN 68 điểm** của ảnh sạch, đúng công cụ của SMIRK gốc (ibug RetinaFace mobilenet0.25 + FAN 2dfan2_alt). SMIRK dùng 17 điểm viền hàm trong landmark loss và 5 điểm để căn ảnh MICA | `clean-faces`, `clean-faces-rafdb`, `expw-crops`, `affectnet_1`, `rafdb-crops` (một lần cho cả 3) | `fan-landmarks` (`<dataset>_fan.npz`) |
+
+Script: `extract_fan_landmarks.py`. Cài đặt: GPU T4 ×1, Internet On.
+
 ## 03_smirk_setup: cài SMIRK trên Kaggle, demo, che khuất nhân tạo
 
 | Notebook | Làm gì | Input | Output |
