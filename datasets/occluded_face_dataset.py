@@ -126,7 +126,7 @@ class OccludedFaceDataset(torch.utils.data.Dataset):
             use_occluded = len(variants) > 0 and np.random.rand() < self.p_occluded
             variant = variants[np.random.randint(len(variants))] if use_occluded else None
         else:
-            use_occluded = len(variants) > 0 and index % 2 == 0
+            use_occluded = len(variants) > 0 and self.p_occluded > 0 and index % 2 == 0
             variant = variants[0] if use_occluded else None
         if use_occluded:
             occluded, occ_mask = self.stores[dataset].get(dataset, name, variant)

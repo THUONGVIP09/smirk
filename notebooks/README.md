@@ -86,12 +86,13 @@ Script: `extract_mediapipe_landmarks.py`, `compute_face_quality.py`, `filter_and
 
 | Notebook | Làm gì | Input | Output |
 |---|---|---|---|
-| `kaggle_train_occlusion.ipynb` | `MODE = 'transfer'` (backbone đóng băng, chỉ train lớp đầu ra) hoặc `'finetune'` (toàn bộ expression encoder + mạng sinh ảnh, có cycle path). `QUICK_TEST = True` chạy thử ~30 vòng | `flame2020`, `pytorch3d-wheel`, `clean-faces` (+ `clean-faces-rafdb`), các `*-crops`, các `occluded-*`, (tùy chọn) EMOCA `ResNet50` | `logs/<MODE>/`: `model_final.pt` (trọng số, cùng định dạng `SMIRK_em1.pt`), `checkpoint_last.pt` (để resume), ảnh minh họa |
+| `kaggle_train_occlusion.ipynb` | `METHOD`: `'original'` (phương pháp SMIRK gốc, ảnh sạch của dataset mới), `'occ_augment'` (gốc + thêm ảnh bị che, loss không đổi), `'occlusion_aware'` (cải tiến). `MODE = 'transfer'` (backbone đóng băng, chỉ train lớp đầu ra) hoặc `'finetune'` (toàn bộ expression encoder + mạng sinh ảnh, có cycle path). `QUICK_TEST = True` chạy thử ~30 vòng | `flame2020`, `pytorch3d-wheel`, `clean-faces` (+ `clean-faces-rafdb`), các `*-crops`, các `occluded-*`, (tùy chọn) EMOCA `ResNet50` | `logs/<MODE>/`: `model_final.pt` (trọng số, cùng định dạng `SMIRK_em1.pt`), `checkpoint_last.pt` (để resume), ảnh minh họa |
 
 - Code: [`train_occlusion.py`](../train_occlusion.py), [`src/occlusion_trainer.py`](../src/occlusion_trainer.py),
   [`datasets/occluded_face_dataset.py`](../datasets/occluded_face_dataset.py), cấu hình
   [`config_occlusion_transfer.yaml`](../configs/config_occlusion_transfer.yaml), [`config_occlusion_finetune.yaml`](../configs/config_occlusion_finetune.yaml).
-- Thay đổi so với SMIRK: encoder nhận **ảnh bị che** (50%) hoặc ảnh sạch (50%); mọi đáp án lấy từ **ảnh sạch**;
+- Thứ tự: **`original` trước** (tái lập phương pháp gốc trên dataset mới, mốc so sánh), rồi mới tới các cải tiến.
+- Cải tiến `occlusion_aware` so với SMIRK: encoder nhận **ảnh bị che** (50%) hoặc ảnh sạch (50%); mọi đáp án lấy từ **ảnh sạch**;
   landmark / pixel bị che có trọng số nhỏ (0,2); **loss bảo toàn vùng nhìn thấy** (`visible_consistency`): mesh biểu
   cảm từ ảnh bị che phải trùng mesh của SMIRK gốc trên ảnh sạch ở các đỉnh **không bị che**; cycle path che thêm lên ảnh
   sinh ra; bỏ ảnh che > 70%.
