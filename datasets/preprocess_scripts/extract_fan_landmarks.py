@@ -30,6 +30,13 @@ def main():
     parser.add_argument('--save_every', type=int, default=2000, help='Write the partial results every N faces')
     args = parser.parse_args()
 
+    import torch
+    if args.device.startswith('cuda') and not torch.cuda.is_available():
+        print('WARNING: no GPU available, running on the CPU (very slow): enable the GPU accelerator')
+        args.device = 'cpu'
+    print('device:', args.device, torch.cuda.get_device_name(0) if args.device.startswith('cuda') else '')
+    torch.backends.cudnn.benchmark = True
+
     from ibug.face_detection import RetinaFacePredictor
     from ibug.face_alignment import FANPredictor
     detector = RetinaFacePredictor(threshold=args.threshold, device=args.device, model=RetinaFacePredictor.get_model('mobilenet0.25'))
