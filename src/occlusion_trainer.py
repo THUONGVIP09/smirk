@@ -64,6 +64,24 @@ class OcclusionTrainer(SmirkTrainer):
     def optimizers_step(self, step_encoder=True, step_fuse_generator=True):
         super().optimizers_step(step_encoder, step_fuse_generator and self.occ.optimize_generator)
 
+    def scheduler_step(self):
+        self.encoder_scheduler.step()
+        if self.config.arch.enable_fuse_generator and self.occ.optimize_generator:
+            self.smirk_generator_scheduler.step()
+
+    def trainable_parameters(self):
+        """Number of trainable parameters per module (to check the freezing)."""
+        count = lambda module: sum(p.numel() for p in module.parameters() if p.requires_grad)
+        modules = {'pose encoder': self.smirk_encoder.pose_encoder, 'shape encoder': self.smirk_encoder.shape_encoder,
+                   'expression backbone': self.smirk_encoder.expression_encoder.encoder,
+                   'expression head': self.smirk_encoder.expression_encoder.expression_layers}
+        if self.config.arch.enable_fuse_generator:
+            modules['generator'] = self.smirk_generator
+        optimized = {'pose encoder': self.config.train.optimize_pose, 'shape encoder': self.config.train.optimize_shape,
+                     'expression backbone': self.config.train.optimize_expression and not self.occ.freeze_backbone,
+                     'expression head': self.config.train.optimize_expression, 'generator': self.occ.optimize_generator}
+        return {name: count(m) if optimized[name] else 0 for name, m in modules.items()}
+
     def set_freeze_status(self, config, batch_idx, epoch_idx):
         super().set_freeze_status(config, batch_idx, epoch_idx)
         if not self.occ.optimize_generator:  # the generator never trains: every cycle step trains the encoder

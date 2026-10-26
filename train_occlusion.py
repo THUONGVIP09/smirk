@@ -66,6 +66,7 @@ def main():
         trainer.load_model(config.resume, load_fuse_generator=config.load_fuse_generator, load_encoder=config.load_encoder, device=config.device)
     trainer.create_base_encoder()  # teacher: the initial encoder (pretrained SMIRK), frozen
     trainer.apply_freezing()
+    print('trained parameters:', {k: f'{v / 1e6:.2f}M' for k, v in trainer.trainable_parameters().items()})
 
     start_epoch, start_step, state = 0, 0, None
     if config.resume_checkpoint:
