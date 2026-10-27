@@ -22,8 +22,10 @@ import os
 import csv
 import argparse
 from multiprocessing import Pool
+import time
 import numpy as np
 import cv2
+from tqdm import tqdm
 
 FACE_SIZE = 64
 
@@ -39,6 +41,10 @@ def crop_matrix(landmarks, scale, size):
                       [center[0] + s / 2, center[1] - s / 2]])
     dst = np.float32([[0, 0], [0, size - 1], [size - 1, 0]])
     return cv2.getAffineTransform(src, dst)
+
+
+def init_worker():
+    cv2.setNumThreads(0)  # OpenCV threads in forked worker processes can hang
 
 
 def load_face(job):
@@ -85,19 +91,21 @@ def main():
                     rows += [{**r, 'split': role or r['split']} for r in csv.DictReader(f) if r['dataset'] in image_dirs]
         data = np.load(os.path.join(folder, 'landmarks.npz'))
         landmarks.update(zip(data['keys'], data['landmarks']))
-    print(f'{len(rows)} faces:', {s: sum(r['split'] == s for r in rows) for s in ['train', 'val', 'test', 'real']})
+    print(f'{len(rows)} faces:', {s: sum(r['split'] == s for r in rows) for s in ['train', 'val', 'test', 'real']}, flush=True)
 
     jobs = [(os.path.join(image_dirs[r['dataset']], r['name'] + '.png'), landmarks[f"{r['dataset']}/{r['name']}"][:, :2])
             for r in rows]
-    with Pool(args.num_processes) as pool:
-        faces = np.stack(pool.map(load_face, jobs, chunksize=256))
-    print('faces loaded')
+    started = time.time()
+    with Pool(args.num_processes, initializer=init_worker) as pool:
+        faces = np.stack(list(tqdm(pool.imap(load_face, jobs, chunksize=64), total=len(jobs), desc='loading faces', mininterval=10)))
+    print(f'faces loaded in {(time.time() - started) / 60:.1f} min', flush=True)
 
     train = np.array([i for i, r in enumerate(rows) if r['split'] == 'train'])
     evaluation = np.array([i for i, r in enumerate(rows) if r['split'] != 'train'])
     train_hash, train_faces = phash(faces[train]), normalized(faces[train])
 
     pairs = []
+    print('comparing', flush=True)
     for mirrored in [False, True]:
         eval_faces = faces[evaluation][:, :, ::-1] if mirrored else faces[evaluation]
         eval_hash, eval_norm = phash(eval_faces), normalized(eval_faces)
