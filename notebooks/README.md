@@ -48,7 +48,7 @@ Script: `extract_fan_landmarks.py`. Cài đặt: GPU T4 ×1, Internet On.
 
 | Notebook | Làm gì | Input | Output → Dataset |
 |---|---|---|---|
-| `kaggle_duplicates_real_occlusion.ipynb` | (1) **Tập che khuất thật**: ảnh bị loại **chỉ vì** kính / mũ / tay-vật che (mọi tiêu chí chất lượng khác vẫn đạt), giữ nhãn cảm xúc do người gán, chưa từng dùng để train. (2) **Ảnh trùng**: ExpW, AffectNet, RAF-DB đều lấy từ web nên một ảnh test có thể là ảnh train của bộ khác; tìm bằng perceptual hash vùng mặt (cả ảnh lật ngang) rồi xác nhận bằng tương quan pixel ≥ 0,9; ảnh train trùng được liệt kê để **loại khỏi train và khỏi bộ phân loại cảm xúc** | `clean-faces`, `clean-faces-rafdb`, `expw-crops`, `affectnet_1`, `rafdb-crops` | `eval-extras` (`real_occlusion/`, `duplicates/exclude_train.csv`) |
+| `kaggle_duplicates_real_occlusion.ipynb` | (1) **Tập che khuất thật**: ảnh bị loại **chỉ vì** kính / mũ / tay-vật che (mọi tiêu chí chất lượng khác vẫn đạt), giữ nhãn cảm xúc do người gán, chưa từng dùng để train. (2) **Ảnh trùng**: ExpW, AffectNet, RAF-DB đều lấy từ web nên một ảnh test có thể là ảnh train của bộ khác; tìm bằng perceptual hash vùng mặt (cả ảnh lật ngang) rồi xác nhận bằng tương quan **chi tiết** vùng giữa mặt (ảnh lọc thông dải, không bị ảnh hưởng bởi đổi màu hay chữ chèn ở mép; tương quan pixel thô bỏ sót các ảnh này); ảnh train trùng được liệt kê để **loại khỏi train và khỏi bộ phân loại cảm xúc** | `clean-faces`, `clean-faces-rafdb`, `expw-crops`, `affectnet_1`, `rafdb-crops` | `eval-extras` (`real_occlusion/`, `duplicates/exclude_train.csv`) |
 
 Script: `make_real_occlusion_set.py`, `find_duplicates.py`. Cài đặt: **Accelerator None** (CPU), Internet On.
 Xem các cặp ảnh quanh ngưỡng trong notebook: cặp trên ngưỡng phải đúng là cùng một ảnh.

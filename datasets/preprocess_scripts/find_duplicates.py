@@ -6,14 +6,19 @@ one), e.g. in the RAF-DB test set and in the AffectNet train set. Training on al
 seen during training. Every face is compared on its face region (the landmark box, so the different crops of the
 datasets do not matter), also mirrored:
     1. candidates: perceptual hash (DCT of the 32x32 face, 64 bits) within --max_hash_distance bits
-    2. duplicates: normalized correlation of the 64x64 grayscale faces >= --min_correlation
-Look at the pairs saved in the preview to check the thresholds.
+    2. duplicates: correlation of the face DETAILS >= --min_detail_correlation: band-pass filtered (difference of
+       Gaussians) center of the 64x64 grayscale faces. Different people share the coarse light / dark layout of a face
+       (their plain pixel correlation reaches 0.85), but not the details (wrinkles, hair, eye contours); the same photo
+       keeps its details under color / tone changes, and the text or borders added at the edges of memes are left out.
+       The plain pixel correlation (column correlation) is kept for reference.
+Look at the pairs around the threshold (notebook) to check it.
 
 Inputs: folders with clean_meta.csv (cleaning output) or real_occluded_meta.csv (make_real_occlusion_set.py) and
 landmarks.npz; evaluation faces are the val / test faces and the real occlusion faces.
 
 Output (out_dir):
-    duplicates.csv     every candidate pair (eval face, train face), hash distance, correlation, mirrored, duplicate
+    duplicates.csv     every candidate pair (eval face, train face), hash distance, correlation, detail_correlation,
+                       mirrored, duplicate
     exclude_train.csv  dataset, name of the train faces to leave out (data.exclude_files of the training,
                        --exclude of the benchmark: the emotion probe is trained on train faces too)
     preview.jpg        some duplicate pairs and the least similar accepted pairs
@@ -70,6 +75,14 @@ def normalized(faces):
     return x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-6)
 
 
+def details(faces):
+    """Band-pass filtered center of the faces, normalized (N x D): the correlation of two rows compares the details."""
+    x = faces.astype(np.float32)
+    x = np.stack([cv2.GaussianBlur(f, (0, 0), 1.0) - cv2.GaussianBlur(f, (0, 0), 4.0) for f in x])
+    m = FACE_SIZE // 8
+    return normalized(x[:, m:-m, m:-m])
+
+
 def main():
     parser = argparse.ArgumentParser(description='Find train faces that duplicate evaluation faces.')
     parser.add_argument('--meta_dir', action='append', required=True,
@@ -77,7 +90,8 @@ def main():
     parser.add_argument('--image_dir', action='append', required=True, help='dataset=folder with the crop images (repeatable)')
     parser.add_argument('--out_dir', required=True)
     parser.add_argument('--max_hash_distance', type=int, default=12, help='Candidates: hash distance in bits (of 64)')
-    parser.add_argument('--min_correlation', type=float, default=0.9, help='Duplicates: correlation of the 64x64 faces')
+    parser.add_argument('--min_detail_correlation', type=float, default=0.6, help='Duplicates: correlation of the face details')
+    parser.add_argument('--cache', default=None, help='.npy file keeping the loaded faces (re-runs with other thresholds skip the loading)')
     parser.add_argument('--candidates_per_face', type=int, default=10)
     parser.add_argument('--num_processes', type=int, default=4)
     args = parser.parse_args()
@@ -95,20 +109,26 @@ def main():
 
     jobs = [(os.path.join(image_dirs[r['dataset']], r['name'] + '.png'), landmarks[f"{r['dataset']}/{r['name']}"][:, :2])
             for r in rows]
-    started = time.time()
-    with Pool(args.num_processes, initializer=init_worker) as pool:
-        faces = np.stack(list(tqdm(pool.imap(load_face, jobs, chunksize=64), total=len(jobs), desc='loading faces', mininterval=10)))
-    print(f'faces loaded in {(time.time() - started) / 60:.1f} min', flush=True)
+    if args.cache and os.path.exists(args.cache) and len(np.load(args.cache, mmap_mode='r')) == len(jobs):
+        faces = np.load(args.cache)
+        print('faces loaded from', args.cache, flush=True)
+    else:
+        started = time.time()
+        with Pool(args.num_processes, initializer=init_worker) as pool:
+            faces = np.stack(list(tqdm(pool.imap(load_face, jobs, chunksize=64), total=len(jobs), desc='loading faces', mininterval=10)))
+        print(f'faces loaded in {(time.time() - started) / 60:.1f} min', flush=True)
+        if args.cache:
+            np.save(args.cache, faces)
 
     train = np.array([i for i, r in enumerate(rows) if r['split'] == 'train'])
     evaluation = np.array([i for i, r in enumerate(rows) if r['split'] != 'train'])
-    train_hash, train_faces = phash(faces[train]), normalized(faces[train])
+    train_hash, train_faces, train_details = phash(faces[train]), normalized(faces[train]), details(faces[train])
 
     pairs = []
     print('comparing', flush=True)
     for mirrored in [False, True]:
         eval_faces = faces[evaluation][:, :, ::-1] if mirrored else faces[evaluation]
-        eval_hash, eval_norm = phash(eval_faces), normalized(eval_faces)
+        eval_hash, eval_norm, eval_details = phash(eval_faces), normalized(eval_faces), details(eval_faces)
         for start in range(0, len(evaluation), 1024):
             distance = (64 - eval_hash[start:start + 1024] @ train_hash.T) / 2   # Hamming distance from the signs
             k = min(args.candidates_per_face, distance.shape[1])
@@ -116,28 +136,30 @@ def main():
             for row, columns in enumerate(nearest):
                 e = start + row
                 for t in columns[distance[row, columns] <= args.max_hash_distance]:
-                    pairs.append((evaluation[e], train[t], int(distance[row, t]),
-                                  float(eval_norm[e] @ train_faces[t]), mirrored))
+                    pairs.append((evaluation[e], train[t], int(distance[row, t]), float(eval_norm[e] @ train_faces[t]),
+                                  float(eval_details[e] @ train_details[t]), mirrored))
     print(f'{len(pairs)} candidate pairs')
 
     # one row per (eval face, train face): the more similar orientation
     best = {}
-    for e, t, distance, correlation, mirrored in pairs:
-        if (e, t) not in best or correlation > best[(e, t)][1]:
-            best[(e, t)] = (distance, correlation, mirrored)
+    for e, t, distance, correlation, detail, mirrored in pairs:
+        if (e, t) not in best or detail > best[(e, t)][2]:
+            best[(e, t)] = (distance, correlation, detail, mirrored)
 
     os.makedirs(args.out_dir, exist_ok=True)
     table, excluded = [], {}
-    for (e, t), (distance, correlation, mirrored) in sorted(best.items(), key=lambda x: -x[1][1]):
-        duplicate = correlation >= args.min_correlation
+    ordered = sorted(best.items(), key=lambda x: -x[1][2])
+    for (e, t), (distance, correlation, detail, mirrored) in ordered:
+        duplicate = detail >= args.min_detail_correlation
         a, b = rows[e], rows[t]
-        table.append([a['dataset'], a['name'], a['split'], b['dataset'], b['name'], distance, round(correlation, 4), mirrored, duplicate])
+        table.append([a['dataset'], a['name'], a['split'], b['dataset'], b['name'], distance, round(correlation, 4),
+                      round(detail, 4), mirrored, duplicate])
         if duplicate:
             excluded[(b['dataset'], b['name'])] = True
     with open(os.path.join(args.out_dir, 'duplicates.csv'), 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['eval_dataset', 'eval_name', 'eval_split', 'train_dataset', 'train_name', 'hash_distance',
-                         'correlation', 'mirrored', 'duplicate'])
+                         'correlation', 'detail_correlation', 'mirrored', 'duplicate'])
         writer.writerows(table)
     with open(os.path.join(args.out_dir, 'exclude_train.csv'), 'w', newline='') as f:
         writer = csv.writer(f)
@@ -153,16 +175,16 @@ def main():
     print(f'{len(excluded)} train faces to exclude ({100 * len(excluded) / max(len(train), 1):.2f}% of the train faces)')
 
     # preview: the most similar duplicates, the least similar duplicates (threshold check) and the best rejected pairs
-    duplicates = [p for p in sorted(best.items(), key=lambda x: -x[1][1]) if p[1][1] >= args.min_correlation]
-    rejected = [p for p in sorted(best.items(), key=lambda x: -x[1][1]) if p[1][1] < args.min_correlation]
+    duplicates = [p for p in ordered if p[1][2] >= args.min_detail_correlation]
+    rejected = [p for p in ordered if p[1][2] < args.min_detail_correlation]
     groups = [duplicates[:8], duplicates[-8:], rejected[:8]]
     tiles = []
     for group in groups:
         line = []
-        for (e, t), (distance, correlation, mirrored) in group:
+        for (e, t), (distance, correlation, detail, mirrored) in group:
             pair = np.concatenate([faces[e][:, ::-1] if mirrored else faces[e], faces[t]], axis=1)
             pair = cv2.resize(pair, (256, 128))
-            cv2.putText(pair, f'{correlation:.2f}', (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, 255, 1)
+            cv2.putText(pair, f'{detail:.2f}', (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, 255, 1)
             line.append(np.pad(pair, 4))
         line += [np.zeros((136, 264), np.uint8)] * (8 - len(line))
         tiles.append(np.concatenate(line, axis=1))
