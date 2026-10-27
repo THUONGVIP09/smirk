@@ -1,11 +1,12 @@
 # Occlusion-aware transfer learning of the pretrained SMIRK (train_occlusion.py).
 # Starts from SMIRK_em1.pt; the expression backbone and the translator stay frozen, only the expression regression head
 # is trained (no cycle path).
-resume: pretrained_models/SMIRK_em1.pt   # initial weights (also the frozen teacher of the visible-region consistency)
+resume: pretrained_models/SMIRK_em1.pt   # initial weights (also the base encoder: occlusion.teacher=base)
 load_encoder: True
 load_fuse_generator: True
 resume_checkpoint:                        # checkpoint_last.pt of an interrupted run
 device: cuda:0
+seed: 0                                   # faces of every epoch, augmentations, masking (train_occlusion.py)
 image_size: 224
 K: 1
 
@@ -26,7 +27,7 @@ train:
   mask_ratio: 0.01
   mask_dilation_radius: 10
   Ke: 1
-  use_base_model_for_regularization: True   # regularize towards the teacher on the clean image
+  use_base_model_for_regularization: False  # as the original SMIRK: regularize towards zero (True: towards the pretrained SMIRK on the clean image)
   resume_epoch: 0
   train_scale_min: 1.2
   train_scale_max: 1.8
@@ -42,7 +43,7 @@ train:
     shape_regularization: 100
     cycle_loss: 0.0             # no cycle path: the translator is frozen
     mica_loss: 0
-    visible_consistency: 1.0    # expression mesh vs the teacher on the clean image, on the visible face vertices (mm)
+    visible_consistency: 1.0    # expression mesh vs occlusion.teacher on the clean image, on the visible face vertices (mm)
 
   optimize_pose: False
   optimize_shape: False
@@ -56,6 +57,7 @@ occlusion:
   landmark_weight_occluded: 0.2       # weight of occluded landmarks (visible = 1)
   reconstruction_weight_occluded: 0.2 # weight of occluded pixels in the L1 reconstruction loss (visible = 1)
   consistency_weight_occluded: 0.1    # weight of occluded vertices in the visible-region consistency (visible = 1)
+  teacher: self                       # visible-region consistency target on the clean image: self (the trained encoder, no gradient) or base (the pretrained SMIRK)
   cycle_occlusion: False
   freeze_backbone: True               # transfer learning: train only the expression head
   optimize_generator: False
@@ -75,3 +77,4 @@ data:            # filled from --paths paths.yaml
   image_dirs: {}
   occluded_dirs: {}
   fan_files: {}    # {dataset: .npz from extract_fan_landmarks.py}, optional
+  exclude_files: [] # exclude_train.csv of find_duplicates.py: train faces that duplicate evaluation faces

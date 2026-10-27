@@ -7,9 +7,13 @@ Same framework as SmirkTrainer (reconstruction path through the neural translato
   * landmark and L1 reconstruction losses are weighted by visibility: occluded landmarks / pixels get
     occlusion.landmark_weight_occluded / occlusion.reconstruction_weight_occluded instead of 1;
   * visible-region consistency (loss_weights.visible_consistency): the expression mesh predicted from the occluded
-    image must match the one of the teacher (the frozen base encoder, i.e. the pretrained SMIRK, on the clean image)
-    on the face vertices that are NOT occluded (weight 1), and only loosely on the occluded ones
-    (occlusion.consistency_weight_occluded); this is what keeps the visible parts unaffected by the occluder;
+    image must match the one of a teacher on the CLEAN image on the face vertices that are NOT occluded (weight 1), and
+    only loosely on the occluded ones (occlusion.consistency_weight_occluded); this is what keeps the visible parts
+    unaffected by the occluder. occlusion.teacher:
+      self  the encoder being trained, on the clean image, without gradient (self-consistency: the prediction must not
+            change when parts are occluded; does not depend on the pretrained SMIRK, so it also works from scratch and
+            the gains cannot come from copying the pretrained model)
+      base  the frozen base encoder (the pretrained SMIRK) on the clean image (distillation)
   * cycle path: the translator output is occluded with the sample's occluder before it is encoded again
     (occlusion.cycle_occlusion), so the encoder learns to recover known parameters despite the occlusion;
   * transfer learning: occlusion.freeze_backbone keeps the expression backbone frozen (only the regression head is
@@ -122,7 +126,13 @@ class OcclusionTrainer(SmirkTrainer):
         flame_output.update(renderer_output)
 
         with torch.no_grad():
-            teacher = self.base_encoder(img)  # pretrained encoder on the clean image
+            base_output = self.base_encoder(img) if self.config.train.use_base_model_for_regularization else None
+            if lw.visible_consistency > 0:
+                assert self.occ.teacher in ('self', 'base'), 'occlusion.teacher must be self or base'
+                if self.occ.teacher == 'self':  # same mode (batch-norm statistics) as the prediction on the occluded image
+                    teacher = self.smirk_encoder(img)
+                else:
+                    teacher = base_output if base_output is not None else self.base_encoder(img)
 
         losses = {}
 
@@ -135,10 +145,8 @@ class OcclusionTrainer(SmirkTrainer):
         landmark_error = ((flame_output['landmarks_mp'] - batch['landmarks_mp']) ** 2).mean(-1)
         losses['landmark_loss_mp'] = weighted_mean(landmark_error, landmark_weights)
 
-        # regularization (w.r.t. the teacher on the clean image, or zero)
-        if self.config.train.use_base_model_for_regularization:
-            base_output = teacher
-        else:
+        # regularization (w.r.t. the pretrained encoder on the clean image, or zero)
+        if base_output is None:
             base_output = {k: torch.zeros_like(encoder_output[k]) for k in ['expression_params', 'shape_params', 'jaw_params']}
         losses['expression_regularization'] = torch.mean((encoder_output['expression_params'] - base_output['expression_params']) ** 2)
         losses['shape_regularization'] = torch.mean((encoder_output['shape_params'] - base_output['shape_params']) ** 2)

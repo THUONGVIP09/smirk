@@ -32,6 +32,16 @@ of the clean train faces, all expression labels (8 with AffectNet's contempt); a
 clean / occluded test faces, computed over the classes present in each dataset (8 for AffectNet, 7 for ExpW / RAF-DB).
 Valence / arousal are not evaluated (no such labels in the datasets used here).
 
+Real occlusions (--real_dir, make_real_occlusion_set.py): faces with glasses / hats / hands or objects that the cleaning
+step rejected, with their human labels; protocols real_glasses / real_hat / real_other / real_all give the emotion
+scores on them (no clean version exists, so only the emotion scores; the change is w.r.t. the clean test faces of the
+same dataset, which are other faces). This tests occlusions that the synthetic occluder never produced.
+
+Confidence intervals (--bootstrap resamples of the faces, src/evaluation/bootstrap.py): <score>_ci_low / _ci_high for
+the scores, and for the change w.r.t. clean (paired on the same faces for the synthetic protocols). Compare two models
+with src/evaluation/compare_runs.py (paired bootstrap on the same faces).
+--exclude leaves out train faces that duplicate test faces (find_duplicates.py) from the emotion probe training.
+
 Run from the repository root (FLAME assets are loaded with relative paths), e.g.
     python -m src.evaluation.occlusion_benchmark --clean_dir CLEAN_FACES --image_dir expw=.../images \
         --image_dir affectnet=.../images --checkpoint pretrained_models/SMIRK_em1.pt --out_dir results/baseline
@@ -39,6 +49,7 @@ Run from the repository root (FLAME assets are loaded with relative paths), e.g.
 import os
 import json
 import argparse
+import csv
 import numpy as np
 import pandas as pd
 import cv2
@@ -49,6 +60,7 @@ from src.smirk_encoder import SmirkEncoder
 from src.FLAME.FLAME import FLAME
 from src.renderer.util import batch_orth_proj
 from src.utils.occlusion import FaceOccluder, occlusion_rng, PART_CHOICES
+from src.evaluation import bootstrap
 
 # indices of the MediaPipe landmarks that SMIRK uses (same as mediapipe_indices in datasets/base_dataset.py)
 SMIRK_MEDIAPIPE_INDICES = [276, 282, 283, 285, 293, 295, 296, 300, 334, 336, 46, 52, 53,
@@ -66,6 +78,7 @@ CROP_SIZE = 224
 REGIONS = ['eyes', 'forehead', 'nose', 'mouth', 'cheeks']
 METRICS = ['occluded_area', 'exp_dist', 'exp_rel', 'exp_scale', 'expr_mm', 'expr_mm_visible', 'expr_mm_occluded'] + \
           [f'expr_mm_{r}' for r in REGIONS] + ['lmk_px', 'lmk_px_visible', 'lmk_px_occluded']
+CI_METRICS = ['exp_scale', 'expr_mm', 'expr_mm_visible', 'lmk_px']   # metrics that get a confidence interval
 
 
 def crop_matrix(landmarks, scale, size=CROP_SIZE):
@@ -262,6 +275,58 @@ def mean_class_accuracy(labels, predictions):
     return float(np.mean([(predictions[labels == c] == c).mean() for c in classes]))
 
 
+def summarize(per_image, count, seed=0):
+    """Scores per protocol (all datasets and per dataset) with bootstrap confidence intervals."""
+    real = per_image['protocol'].str.startswith('real_')
+    groups = [(('all', p), g) for p, g in per_image.groupby('protocol', sort=False)] + \
+             list(per_image.groupby(['dataset', 'protocol'], sort=False))
+    if real.any():
+        groups += [(('all', 'real_all'), per_image[real])] + \
+                  [((d, 'real_all'), g) for d, g in per_image[real].groupby('dataset', sort=False)]
+
+    rng = np.random.default_rng(seed)
+    clean = {dataset: g for (dataset, protocol), g in groups if protocol == 'clean'}
+    summary = []
+    for (dataset, protocol), group in groups:
+        row = {'dataset': dataset, 'protocol': protocol, 'faces': len(group),
+               **{m: float(group[m].mean()) for m in METRICS},
+               'emotion_classes': group['label'].nunique(),
+               'emotion_acc': float((group['pred_label'] == group['label']).mean()),
+               'emotion_mean_class_acc': mean_class_accuracy(group['label'].to_numpy(), group['pred_label'].to_numpy())}
+        if count:
+            index = bootstrap.resamples(len(group), count, rng)
+            sampled = bootstrap.scores(group, index, CI_METRICS)
+            for m in bootstrap.SCORES + CI_METRICS:
+                row[f'{m}_ci_low'], row[f'{m}_ci_high'] = bootstrap.interval(sampled[m]) if m in sampled else (np.nan, np.nan)
+            reference = clean.get(dataset)
+            if protocol != 'clean' and reference is not None:
+                if protocol.startswith('real_'):  # other faces: independent resamples of the clean faces
+                    reference_scores = bootstrap.scores(reference, bootstrap.resamples(len(reference), count, rng), [])
+                else:  # the same faces: paired
+                    aligned = group[['dataset', 'name']].merge(reference, on=['dataset', 'name'], how='left')
+                    reference_scores = bootstrap.scores(aligned, index, [])
+                for m in bootstrap.SCORES:
+                    row[f'{m}_change_ci_low'], row[f'{m}_change_ci_high'] = bootstrap.interval(sampled[m] - reference_scores[m])
+        summary.append(row)
+    summary = pd.DataFrame(summary)
+
+    # change of every paper-style score with respect to the clean images of the same dataset
+    reference = summary[summary['protocol'] == 'clean'].set_index('dataset')
+    for column in ['emotion_acc', 'emotion_mean_class_acc', 'lmk_px']:
+        values = summary['dataset'].map(reference[column])
+        summary[f'{column}_change'] = summary[column] - values
+        summary[f'{column}_change_pct'] = 100 * (summary[column] - values) / values
+    return summary
+
+
+def read_exclude(paths):
+    excluded = set()
+    for path in paths:
+        with open(path) as f:
+            excluded.update((r['dataset'], r['name']) for r in csv.DictReader(f))
+    return excluded
+
+
 def main():
     parser = argparse.ArgumentParser(description='Occlusion benchmark of a SMIRK encoder.')
     parser.add_argument('--clean_dir', action='append', required=True, help='Folder with clean_meta.csv and landmarks.npz (repeatable)')
@@ -275,6 +340,11 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--limit', type=int, default=0, help='Use only N random test faces (quick check); 0 = all')
     parser.add_argument('--probe_train_max', type=int, default=30000, help='Max clean train faces for the emotion probe')
+    parser.add_argument('--real_dir', action='append', default=[],
+                        help='Folder with real_occluded_meta.csv and landmarks.npz (make_real_occlusion_set.py, repeatable)')
+    parser.add_argument('--exclude', action='append', default=[],
+                        help='CSV with dataset, name of train faces to leave out (exclude_train.csv of find_duplicates.py)')
+    parser.add_argument('--bootstrap', type=int, default=1000, help='Bootstrap resamples for the confidence intervals; 0 = none')
     parser.add_argument('--device', default='cuda')
     args = parser.parse_args()
 
@@ -289,7 +359,25 @@ def main():
         landmarks.update(zip(data['keys'], data['landmarks']))
     meta = pd.concat(metas, ignore_index=True)
     meta = meta[meta['dataset'].isin(list(image_dirs))]
+    excluded = read_exclude(args.exclude)
+    if excluded:
+        keep = [(d, n) not in excluded for d, n in zip(meta['dataset'], meta['name'])]
+        print(f'leaving out {len(keep) - sum(keep)} faces listed in --exclude')
+        meta = meta[keep]
     print('faces per dataset / split:\n', pd.crosstab(meta['dataset'], meta['split']))
+
+    real = []
+    for folder in args.real_dir:
+        real.append(pd.read_csv(os.path.join(folder, 'real_occluded_meta.csv'), dtype={'name': str}))
+        data = np.load(os.path.join(folder, 'landmarks.npz'))
+        landmarks.update(zip(data['keys'], data['landmarks']))
+    real = pd.concat(real, ignore_index=True) if real else None
+    if real is not None:
+        real = real[real['dataset'].isin(list(image_dirs))]
+        if args.limit:
+            real = real.sample(min(args.limit, len(real)), random_state=0)
+        real = real.reset_index(drop=True)
+        print('real occlusions per dataset:\n', pd.crosstab(real['dataset'], real['occlusion']))
 
     test = meta[meta['split'] == 'test']
     if args.limit:
@@ -307,6 +395,8 @@ def main():
     face, regions = face_regions(args.device)
     test_feats, metrics, covered = run_test(encoder, flame, loader(test, protocols), protocols, args.device, face, regions)
     train_feats = run_features(encoder, flame, loader(train, []), args.device)
+    if real is not None:
+        test_feats['real'] = run_features(encoder, flame, loader(real, []), args.device)
     predictions = emotion_probe(train_feats, train['label'].to_numpy(), test_feats)
 
     # per-image table
@@ -321,25 +411,18 @@ def main():
         for k, part in enumerate(PARTS):
             table[f'covered_{part}'] = covered[:, p - 1, k] if p > 0 else 0.0
         rows.append(table)
+    if real is not None:  # real occlusions: emotion scores only
+        table = real[['dataset', 'name', 'label', 'expression']].copy()
+        table['protocol'] = 'real_' + real['occlusion']
+        for m in METRICS:
+            table[m] = np.nan
+        table['pred_label'] = predictions['real']
+        for part in PARTS:
+            table[f'covered_{part}'] = np.nan
+        rows.append(table)
     per_image = pd.concat(rows, ignore_index=True)
 
-    # summary: metrics per protocol (all datasets and per dataset), emotion probe on the 7 basic expressions
-    summary = []
-    for (dataset, protocol), group in [(('all', p), g) for p, g in per_image.groupby('protocol', sort=False)] + \
-                                       list(per_image.groupby(['dataset', 'protocol'], sort=False)):
-        summary.append({'dataset': dataset, 'protocol': protocol, 'faces': len(group),
-                        **{m: float(group[m].mean()) for m in METRICS},
-                        'emotion_classes': group['label'].nunique(),
-                        'emotion_acc': float((group['pred_label'] == group['label']).mean()),
-                        'emotion_mean_class_acc': mean_class_accuracy(group['label'].to_numpy(), group['pred_label'].to_numpy())})
-    summary = pd.DataFrame(summary)
-
-    # change of every paper-style score with respect to the clean images of the same dataset
-    clean = summary[summary['protocol'] == 'clean'].set_index('dataset')
-    for column in ['emotion_acc', 'emotion_mean_class_acc', 'lmk_px']:
-        reference = summary['dataset'].map(clean[column])
-        summary[f'{column}_change'] = summary[column] - reference
-        summary[f'{column}_change_pct'] = 100 * (summary[column] - reference) / reference
+    summary = summarize(per_image, args.bootstrap)
 
     os.makedirs(args.out_dir, exist_ok=True)
     per_image.to_csv(os.path.join(args.out_dir, 'per_image.csv'), index=False)
@@ -347,10 +430,13 @@ def main():
     np.savez_compressed(os.path.join(args.out_dir, 'features.npz'), train=train_feats, train_labels=train['label'].to_numpy(),
                         **{f'test_{p}': f for p, f in test_feats.items()})
     with open(os.path.join(args.out_dir, 'config.json'), 'w') as f:
-        json.dump({**vars(args), 'protocols': protocols, 'test_faces': len(test), 'probe_train_faces': len(train)}, f, indent=1)
+        json.dump({**vars(args), 'protocols': protocols, 'test_faces': len(test), 'probe_train_faces': len(train),
+                   'real_faces': 0 if real is None else len(real), 'excluded_faces': len(excluded)}, f, indent=1)
 
     pd.set_option('display.width', 200)
-    print(summary.round(3).to_string(index=False))
+    columns = ['dataset', 'protocol', 'faces', 'emotion_mean_class_acc', 'emotion_mean_class_acc_ci_low',
+               'emotion_mean_class_acc_ci_high', 'emotion_mean_class_acc_change', 'expr_mm', 'expr_mm_visible', 'exp_scale', 'lmk_px']
+    print(summary[[c for c in columns if c in summary]].round(3).to_string(index=False))
 
 
 if __name__ == '__main__':

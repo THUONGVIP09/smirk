@@ -99,13 +99,15 @@ def build_augmentation():
 
 class OccludedFaceDataset(torch.utils.data.Dataset):
     def __init__(self, clean_dirs, image_dirs, occluded_dirs, split, image_size=224, train_scale=(1.2, 1.8),
-                 test_scale=1.6, p_occluded=0.5, max_occluded_area=0.7, augment=None, fan_files=None):
+                 test_scale=1.6, p_occluded=0.5, max_occluded_area=0.7, augment=None, fan_files=None, exclude_files=None):
         """
         clean_dirs:    folders with clean_meta.csv and landmarks.npz (outputs of the cleaning step)
         image_dirs:    {dataset: folder with the 256x256 crops}
         occluded_dirs: {dataset: folder with occluded_meta.csv / images.bin / masks.bin}
         split:         'train', 'val' or 'test'
         fan_files:     {dataset: .npz from extract_fan_landmarks.py} (optional)
+        exclude_files: CSVs with dataset, name of faces to leave out (exclude_train.csv of find_duplicates.py: train
+                       faces that duplicate evaluation faces)
         """
         self.split, self.image_size, self.p_occluded = split, image_size, p_occluded
         self.train = split == 'train'
@@ -119,6 +121,12 @@ class OccludedFaceDataset(torch.utils.data.Dataset):
                 self.rows += [r for r in csv.DictReader(f) if r['split'] == split and r['dataset'] in image_dirs]
             data = np.load(os.path.join(folder, 'landmarks.npz'))
             self.landmarks.update(zip(data['keys'], data['landmarks']))
+        excluded = set()
+        for path in exclude_files or []:
+            with open(path) as f:
+                excluded.update(f"{r['dataset']}/{r['name']}" for r in csv.DictReader(f))
+        self.excluded = sum(f"{r['dataset']}/{r['name']}" in excluded for r in self.rows)
+        self.rows = [r for r in self.rows if f"{r['dataset']}/{r['name']}" not in excluded]
 
         # occluded variants of every face, without the nearly fully occluded ones
         self.variants = []

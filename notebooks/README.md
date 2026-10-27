@@ -46,6 +46,13 @@ Script: `extract_mediapipe_landmarks.py`, `compute_face_quality.py`, `filter_and
 
 Script: `extract_fan_landmarks.py`. Cài đặt: GPU T4 ×1, Internet On.
 
+| Notebook | Làm gì | Input | Output → Dataset |
+|---|---|---|---|
+| `kaggle_duplicates_real_occlusion.ipynb` | (1) **Tập che khuất thật**: ảnh bị loại **chỉ vì** kính / mũ / tay-vật che (mọi tiêu chí chất lượng khác vẫn đạt), giữ nhãn cảm xúc do người gán, chưa từng dùng để train. (2) **Ảnh trùng**: ExpW, AffectNet, RAF-DB đều lấy từ web nên một ảnh test có thể là ảnh train của bộ khác; tìm bằng perceptual hash vùng mặt (cả ảnh lật ngang) rồi xác nhận bằng tương quan pixel ≥ 0,9; ảnh train trùng được liệt kê để **loại khỏi train và khỏi bộ phân loại cảm xúc** | `clean-faces`, `clean-faces-rafdb`, `expw-crops`, `affectnet_1`, `rafdb-crops` | `eval-extras` (`real_occlusion/`, `duplicates/exclude_train.csv`) |
+
+Script: `make_real_occlusion_set.py`, `find_duplicates.py`. Cài đặt: **Accelerator None** (CPU), Internet On.
+Xem các cặp ảnh quanh ngưỡng trong notebook: cặp trên ngưỡng phải đúng là cùng một ảnh.
+
 ## 03_smirk_setup: cài SMIRK trên Kaggle, demo, che khuất nhân tạo
 
 | Notebook | Làm gì | Input | Output |
@@ -61,9 +68,14 @@ Script: `extract_fan_landmarks.py`. Cài đặt: GPU T4 ×1, Internet On.
 
 | Notebook | Làm gì | Input | Output |
 |---|---|---|---|
-| `kaggle_baseline_evaluation.ipynb` | Chạy `SMIRK_em1.pt` trên **toàn bộ ảnh test**, mỗi ảnh ở 6 kịch bản: `clean`, `random` (1–2 bộ phận ngẫu nhiên), và che đúng `mouth` / `eyes` / `brows` / `nose` (cố định theo tên ảnh) | `clean-faces` (+ `clean-faces-rafdb`), `expw-crops`, `affectnet-crops` (+ `rafdb-crops`) | `baseline_smirk_em1/`: `summary.csv`, `per_image.csv`, `features.npz`, `config.json` |
+| `kaggle_baseline_evaluation.ipynb` | Chạy một mô hình (`RUN = ''` là `SMIRK_em1.pt`, hoặc tên một lần train của notebook 06) trên **toàn bộ ảnh test**, mỗi ảnh ở 8 kịch bản: `clean`, `random` (1–2 bộ phận ngẫu nhiên), che đúng `mouth` / `eyes` / `brows` / `nose`, `lower_face`, `upper_face` (cố định theo tên ảnh); thêm **che khuất thật** (`real_glasses` / `real_hat` / `real_other`); mục 7 **so sánh hai mô hình** | `flame2020`, `clean-faces`, `clean-faces-rafdb`, `expw-crops`, `affectnet_1`, `rafdb-crops`, `eval-extras` (+ output của lần train cần đánh giá) | `eval_<mô hình>/`: `summary.csv`, `per_image.csv`, `features.npz`, `config.json` |
 
-- Cài đặt: **GPU T4 ×1**, Internet On, Secrets FLAME. **Không cần PyTorch3D** (không render).
+- Cài đặt: **GPU T4 ×1**, Internet On. **Không cần PyTorch3D** (không render).
+- **Khoảng tin cậy 95% (bootstrap)** cho mọi điểm số (`*_ci_low` / `*_ci_high`) và cho mức giảm so với ảnh sạch
+  (`*_change_ci_*`, ghép cặp trên cùng ảnh). Khoảng không chứa 0 nghĩa là chênh lệch có ý nghĩa thống kê.
+- So sánh hai mô hình: [`src/evaluation/compare_runs.py`](../src/evaluation/compare_runs.py) (bootstrap ghép cặp trên cùng
+  ảnh test, kết luận `B better` / `B worse` / `no difference`). Hai lần đánh giá phải cùng input và cùng tùy chọn.
+- Bộ phân loại cảm xúc dùng cùng một tập ảnh train (đã bỏ ảnh trùng), cùng seed cho mọi mô hình.
 - Chỉ số (script [`src/evaluation/occlusion_benchmark.py`](../src/evaluation/occlusion_benchmark.py)):
   `exp_dist` / `exp_rel` (sai lệch tham số biểu cảm so với ảnh sạch), `expr_mm` (sai lệch mesh biểu cảm, mm),
   `lmk_px` (lỗi landmark so với landmark MediaPipe của ảnh sạch, pixel trong ảnh 224),
@@ -92,7 +104,7 @@ Script: `extract_fan_landmarks.py`. Cài đặt: GPU T4 ×1, Internet On.
 
 | Notebook | Làm gì | Input | Output |
 |---|---|---|---|
-| `kaggle_train_occlusion.ipynb` | `METHOD`: `'original'` (phương pháp SMIRK gốc, ảnh sạch của dataset mới), `'occ_augment'` (gốc + thêm ảnh bị che, loss không đổi), `'occlusion_aware'` (cải tiến). `MODE = 'transfer'` (backbone đóng băng, chỉ train lớp đầu ra) hoặc `'finetune'` (toàn bộ expression encoder + mạng sinh ảnh, có cycle path). `QUICK_TEST = True` chạy thử ~30 vòng | `flame2020`, `pytorch3d-wheel`, `clean-faces` (+ `clean-faces-rafdb`), các `*-crops`, các `occluded-*`, (tùy chọn) EMOCA `ResNet50` | `logs/<MODE>/`: `model_final.pt` (trọng số, cùng định dạng `SMIRK_em1.pt`), `checkpoint_last.pt` (để resume), ảnh minh họa |
+| `kaggle_train_occlusion.ipynb` | `METHOD`: `'original'` (phương pháp SMIRK gốc, ảnh sạch của dataset mới), `'occ_augment'` (gốc + thêm ảnh bị che, loss không đổi), `'occlusion_aware'` (cải tiến), và các ablation `'aware_no_*'`, `'aware_base_teacher'`. `MODE = 'transfer'` (backbone đóng băng, chỉ train lớp đầu ra) hoặc `'finetune'` (toàn bộ expression encoder + mạng sinh ảnh, có cycle path). `SEED` cố định. `QUICK_TEST = True` chạy thử ~30 vòng | `flame2020`, `pytorch3d-wheel`, `clean-faces`, `clean-faces-rafdb`, các `*-crops`, các `occluded-*`, `fan-landmarks`, `emoca-resnet50`, `eval-extras` | `logs/<RUN>/`: `model_final.pt` (trọng số, cùng định dạng `SMIRK_em1.pt`), `checkpoint_last.pt` (để resume), ảnh minh họa |
 
 - Code: [`train_occlusion.py`](../train_occlusion.py), [`src/occlusion_trainer.py`](../src/occlusion_trainer.py),
   [`datasets/occluded_face_dataset.py`](../datasets/occluded_face_dataset.py), cấu hình
@@ -100,10 +112,35 @@ Script: `extract_fan_landmarks.py`. Cài đặt: GPU T4 ×1, Internet On.
 - Thứ tự: **`original` trước** (tái lập phương pháp gốc trên dataset mới, mốc so sánh), rồi mới tới các cải tiến.
 - Cải tiến `occlusion_aware` so với SMIRK: encoder nhận **ảnh bị che** (50%) hoặc ảnh sạch (50%); mọi đáp án lấy từ **ảnh sạch**;
   landmark / pixel bị che có trọng số nhỏ (0,2); **loss bảo toàn vùng nhìn thấy** (`visible_consistency`): mesh biểu
-  cảm từ ảnh bị che phải trùng mesh của SMIRK gốc trên ảnh sạch ở các đỉnh **không bị che**; cycle path che thêm lên ảnh
+  cảm từ ảnh bị che phải trùng mesh dự đoán **trên ảnh sạch** ở các đỉnh **không bị che**; cycle path che thêm lên ảnh
   sinh ra; bỏ ảnh che > 70%.
+- "Thầy" của loss bảo toàn (`occlusion.teacher`): mặc định `self` = **chính mô hình đang train** trên ảnh sạch (không
+  lan truyền gradient), không phụ thuộc SMIRK gốc nên dùng được cả khi train lại từ đầu, và cải tiến không thể đến từ
+  việc "chép" SMIRK gốc. `base` = SMIRK gốc (chưng cất), chỉ dùng làm ablation.
+- Regularization như SMIRK gốc (`use_base_model_for_regularization: False`, kéo về 0): mọi phương pháp chỉ khác nhau ở
+  các thành phần xử lý che khuất.
+- Ảnh train trùng với ảnh đánh giá (`eval-extras`) bị loại; log in ra số ảnh bị loại.
+- Seed (`seed` trong config, `SEED` trong notebook) cố định thứ tự ảnh, augmentation, masking; chạy tiếp từ checkpoint
+  sẽ bỏ qua đúng các batch đã train của epoch đang dở.
 - Kaggle dừng sau 12 giờ: checkpoint mỗi 500 vòng và trước 11 giờ. Chạy tiếp: gắn output lần trước làm Input.
 - Đánh giá đầy đủ: notebook 04 với `--checkpoint` là `model_final.pt`.
+
+## Kế hoạch thí nghiệm
+
+Mọi mô hình được đánh giá giống nhau (notebook 04): ảnh sạch, 7 kịch bản che nhân tạo, che khuất thật, có khoảng tin cậy.
+
+| Nhóm | Thí nghiệm | `METHOD` | `MODE` |
+|---|---|---|---|
+| A (tái lập) | A0: SMIRK_em1 gốc, không train | (notebook 04, `RUN = ''`) | |
+| | A1 / A2: phương pháp gốc trên dataset mới | `original` | `transfer` / `finetune` |
+| | A3: train lại từ đầu (pretrain + train) | (chưa có) | |
+| B (cải tiến) | B0: chỉ thêm ảnh bị che | `occ_augment` | `transfer` / `finetune` |
+| | B1: đầy đủ | `occlusion_aware` | `transfer` / `finetune` |
+| | Ablation B1: bỏ từng thành phần | `aware_no_consistency`, `aware_no_weighting`, `aware_base_teacher` | `transfer` |
+| | | `aware_no_cycle_occlusion` | `finetune` |
+
+Thứ tự: notebook `kaggle_duplicates_real_occlusion` → A0 → A1, A2 → B0, B1 → ablation. Siêu tham số giống nhau cho mọi
+phương pháp và không chỉnh theo kết quả tập test. Khi chênh lệch nhỏ, chạy thêm `SEED = 1` cho hai mô hình cần so sánh.
 
 ## Lưu ý chung
 
