@@ -6,11 +6,15 @@ one), e.g. in the RAF-DB test set and in the AffectNet train set. Training on al
 seen during training. Every face is compared on its face region (the landmark box, so the different crops of the
 datasets do not matter), also mirrored:
     1. candidates: perceptual hash (DCT of the 32x32 face, 64 bits) within --max_hash_distance bits
-    2. duplicates: correlation of the face DETAILS >= --min_detail_correlation: band-pass filtered (difference of
-       Gaussians) center of the 64x64 grayscale faces. Different people share the coarse light / dark layout of a face
-       (their plain pixel correlation reaches 0.85), but not the details (wrinkles, hair, eye contours); the same photo
-       keeps its details under color / tone changes, and the text or borders added at the edges of memes are left out.
-       The plain pixel correlation (column correlation) is kept for reference.
+    2. similar candidates: correlation of the face details (band-pass filtered center of the 64x64 faces)
+       >= --verify_min_detail, or plain pixel correlation >= --verify_min_correlation. Neither score separates the
+       duplicates on its own: copies with other resolution / crop / colors / text drop to 0.75, different people of
+       similar faces reach 0.8
+    3. duplicates: geometric verification of the similar candidates: SIFT points of the two 128x128 face crops that
+       agree with one similarity transform close to the identity (RANSAC) >= --min_inliers. The same photo keeps
+       dozens of them under color / crop / resolution changes and added text (26-105 in tests), different photos have
+       a few chance matches (0-8; up to 17 for two nearly identical frames of one video). Nearly identical faces
+       (detail correlation >= --auto_detail) are duplicates without it (blurred faces can have too few SIFT points).
 Look at the pairs around the threshold (notebook) to check it.
 
 Inputs: folders with clean_meta.csv (cleaning output) or real_occluded_meta.csv (make_real_occlusion_set.py) and
@@ -18,13 +22,14 @@ landmarks.npz; evaluation faces are the val / test faces and the real occlusion 
 
 Output (out_dir):
     duplicates.csv     every candidate pair (eval face, train face), hash distance, correlation, detail_correlation,
-                       mirrored, duplicate
+                       inliers (-1 = not verified), mirrored, duplicate
     exclude_train.csv  dataset, name of the train faces to leave out (data.exclude_files of the training,
                        --exclude of the benchmark: the emotion probe is trained on train faces too)
     preview.jpg        some duplicate pairs and the least similar accepted pairs
 """
 import os
 import csv
+import pickle
 import argparse
 from multiprocessing import Pool
 import time
@@ -75,6 +80,50 @@ def normalized(faces):
     return x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-6)
 
 
+VERIFY_SIZE = 128
+_sift = None
+
+
+def load_features(job):
+    """SIFT keypoints / descriptors of the 128x128 face crop (mirrored if asked) for the geometric verification."""
+    global _sift
+    if _sift is None:
+        _sift = cv2.SIFT_create(nfeatures=400)
+    path, landmarks, mirrored = job
+    image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        return np.zeros((0, 2), np.float32), np.zeros((0, 128), np.float32)
+    face = cv2.warpAffine(image, crop_matrix(landmarks, 1.2, VERIFY_SIZE), (VERIFY_SIZE, VERIFY_SIZE), borderValue=0)
+    if mirrored:
+        face = np.ascontiguousarray(face[:, ::-1])
+    keypoints, descriptors = _sift.detectAndCompute(face, None)
+    if descriptors is None:
+        return np.zeros((0, 2), np.float32), np.zeros((0, 128), np.float32)
+    return np.float32([k.pt for k in keypoints]), descriptors
+
+
+def geometric_inliers(a, b, matcher):
+    """Matched SIFT points of two aligned faces that agree with one similarity transform close to the identity
+    (same photo: crop / scale / color / text changes keep many of them; different photos: a few chance matches)."""
+    (points_a, desc_a), (points_b, desc_b) = a, b
+    if len(desc_a) < 2 or len(desc_b) < 2:
+        return 0
+    matches = [m for m, n in (p for p in matcher.knnMatch(desc_a, desc_b, k=2) if len(p) == 2) if m.distance < 0.8 * n.distance]
+    if len(matches) < 4:
+        return 0
+    src = points_a[[m.queryIdx for m in matches]]
+    dst = points_b[[m.trainIdx for m in matches]]
+    M, inliers = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+    if M is None:
+        return 0
+    scale = np.hypot(M[0, 0], M[1, 0])
+    center = np.float32([VERIFY_SIZE / 2, VERIFY_SIZE / 2])
+    shift = np.linalg.norm(M[:, :2] @ center + M[:, 2] - center)
+    if not (0.8 < scale < 1.25 and shift < 0.15 * VERIFY_SIZE):  # the faces are aligned: the transform must be too
+        return 0
+    return int(inliers.sum())
+
+
 def details(faces):
     """Band-pass filtered center of the faces, normalized (N x D): the correlation of two rows compares the details."""
     x = faces.astype(np.float32)
@@ -90,8 +139,12 @@ def main():
     parser.add_argument('--image_dir', action='append', required=True, help='dataset=folder with the crop images (repeatable)')
     parser.add_argument('--out_dir', required=True)
     parser.add_argument('--max_hash_distance', type=int, default=12, help='Candidates: hash distance in bits (of 64)')
-    parser.add_argument('--min_detail_correlation', type=float, default=0.6, help='Duplicates: correlation of the face details')
-    parser.add_argument('--cache', default=None, help='.npy file keeping the loaded faces (re-runs with other thresholds skip the loading)')
+    parser.add_argument('--verify_min_detail', type=float, default=0.5, help='Verify the candidates with this face detail correlation')
+    parser.add_argument('--verify_min_correlation', type=float, default=0.85, help='... or this plain pixel correlation')
+    parser.add_argument('--min_inliers', type=int, default=20, help='Duplicates: geometrically consistent SIFT matches')
+    parser.add_argument('--auto_detail', type=float, default=0.95, help='Duplicates without verification: face detail correlation')
+    parser.add_argument('--cache', default=None, help='.npy file keeping the loaded faces (and <cache>.sift.pkl the SIFT '
+                                                       'features): re-runs with other thresholds skip the loading')
     parser.add_argument('--candidates_per_face', type=int, default=10)
     parser.add_argument('--num_processes', type=int, default=4)
     args = parser.parse_args()
@@ -147,19 +200,44 @@ def main():
             best[(e, t)] = (distance, correlation, detail, mirrored)
 
     os.makedirs(args.out_dir, exist_ok=True)
+    # geometric verification of the similar candidates
+    verify = [(e, t, mirrored) for (e, t), (_, correlation, detail, mirrored) in best.items()
+              if detail >= args.verify_min_detail or correlation >= args.verify_min_correlation]
+    keys = sorted({(e, mirrored) for e, _, mirrored in verify} | {(t, False) for _, t, _ in verify})
+    features = {}
+    sift_cache = args.cache + '.sift.pkl' if args.cache else None
+    if sift_cache and os.path.exists(sift_cache):
+        with open(sift_cache, 'rb') as f:
+            features = pickle.load(f)
+    missing = [k for k in keys if k not in features]
+    print(f'{len(verify)} similar candidate pairs to verify ({len(missing)} faces to load)', flush=True)
+    if missing:
+        with Pool(args.num_processes, initializer=init_worker) as pool:
+            loaded = tqdm(pool.imap(load_features, [jobs[i] + (mirrored,) for i, mirrored in missing], chunksize=32),
+                          total=len(missing), desc='SIFT features', mininterval=10)
+            features.update(zip(missing, loaded))
+        if sift_cache:
+            with open(sift_cache, 'wb') as f:
+                pickle.dump(features, f)
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+    inliers = {(e, t): geometric_inliers(features[(e, mirrored)], features[(t, False)], matcher)
+               for e, t, mirrored in tqdm(verify, desc='verifying', mininterval=10)}
+
     table, excluded = [], {}
-    ordered = sorted(best.items(), key=lambda x: -x[1][2])
+    ordered = sorted(best.items(), key=lambda x: (-inliers.get(x[0], -1), -x[1][2]))
+    is_duplicate = lambda key, detail: inliers.get(key, -1) >= args.min_inliers or detail >= args.auto_detail
     for (e, t), (distance, correlation, detail, mirrored) in ordered:
-        duplicate = detail >= args.min_detail_correlation
+        count = inliers.get((e, t), -1)
+        duplicate = is_duplicate((e, t), detail)
         a, b = rows[e], rows[t]
         table.append([a['dataset'], a['name'], a['split'], b['dataset'], b['name'], distance, round(correlation, 4),
-                      round(detail, 4), mirrored, duplicate])
+                      round(detail, 4), count, mirrored, duplicate])
         if duplicate:
             excluded[(b['dataset'], b['name'])] = True
     with open(os.path.join(args.out_dir, 'duplicates.csv'), 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['eval_dataset', 'eval_name', 'eval_split', 'train_dataset', 'train_name', 'hash_distance',
-                         'correlation', 'detail_correlation', 'mirrored', 'duplicate'])
+                         'correlation', 'detail_correlation', 'inliers', 'mirrored', 'duplicate'])
         writer.writerows(table)
     with open(os.path.join(args.out_dir, 'exclude_train.csv'), 'w', newline='') as f:
         writer = csv.writer(f)
@@ -175,8 +253,8 @@ def main():
     print(f'{len(excluded)} train faces to exclude ({100 * len(excluded) / max(len(train), 1):.2f}% of the train faces)')
 
     # preview: the most similar duplicates, the least similar duplicates (threshold check) and the best rejected pairs
-    duplicates = [p for p in ordered if p[1][2] >= args.min_detail_correlation]
-    rejected = [p for p in ordered if p[1][2] < args.min_detail_correlation]
+    duplicates = [p for p in ordered if is_duplicate(p[0], p[1][2])]
+    rejected = [p for p in ordered if not is_duplicate(p[0], p[1][2])]
     groups = [duplicates[:8], duplicates[-8:], rejected[:8]]
     tiles = []
     for group in groups:
@@ -184,7 +262,7 @@ def main():
         for (e, t), (distance, correlation, detail, mirrored) in group:
             pair = np.concatenate([faces[e][:, ::-1] if mirrored else faces[e], faces[t]], axis=1)
             pair = cv2.resize(pair, (256, 128))
-            cv2.putText(pair, f'{detail:.2f}', (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, 255, 1)
+            cv2.putText(pair, f'{inliers.get((e, t), -1)}', (4, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45, 255, 1)
             line.append(np.pad(pair, 4))
         line += [np.zeros((136, 264), np.uint8)] * (8 - len(line))
         tiles.append(np.concatenate(line, axis=1))
