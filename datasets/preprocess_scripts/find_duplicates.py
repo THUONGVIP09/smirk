@@ -143,7 +143,7 @@ def main():
     parser.add_argument('--max_hash_distance', type=int, default=12, help='Candidates: hash distance in bits (of 64)')
     parser.add_argument('--verify_min_detail', type=float, default=0.5, help='Verify the candidates with this face detail correlation')
     parser.add_argument('--verify_min_correlation', type=float, default=0.85, help='... or this plain pixel correlation')
-    parser.add_argument('--min_inliers', type=int, default=12, help='Duplicates: geometrically consistent SIFT matches')
+    parser.add_argument('--min_inliers', type=int, default=16, help='Duplicates: geometrically consistent SIFT matches')
     parser.add_argument('--min_inliers_similar', type=int, default=10, help='... or this many for faces with similar details')
     parser.add_argument('--similar_detail', type=float, default=0.7, help='Face detail correlation of the faces with similar details')
     parser.add_argument('--auto_detail', type=float, default=0.95, help='Duplicates without verification: face detail correlation')
