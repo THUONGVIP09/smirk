@@ -11,9 +11,8 @@ datasets do not matter), also mirrored:
        duplicates on its own: copies with other resolution / crop / colors / text drop to 0.75, different people of
        similar faces reach 0.8
     3. duplicates: geometric verification of the similar candidates: SIFT points of the two 128x128 face crops that
-       agree with one similarity transform close to the identity (RANSAC) >= --min_inliers, or >= --min_inliers_similar
-       for faces with a detail correlation >= --similar_detail (in the 10-15 range both kinds of pairs occur, the
-       copies with a higher detail correlation than the different photos). The same photo keeps
+       agree with one similarity transform close to the identity (RANSAC) >= --min_inliers (12: the pairs with 12-15
+       matches are mostly copies, with 11 about half of them). The same photo keeps
        dozens of them under color / crop / resolution changes and added text (26-105 in tests), different photos have
        a few chance matches (0-8; up to 17 for two nearly identical frames of one video). Nearly identical faces
        (detail correlation >= --auto_detail) are duplicates without it (blurred faces can have too few SIFT points).
@@ -144,8 +143,6 @@ def main():
     parser.add_argument('--verify_min_detail', type=float, default=0.5, help='Verify the candidates with this face detail correlation')
     parser.add_argument('--verify_min_correlation', type=float, default=0.85, help='... or this plain pixel correlation')
     parser.add_argument('--min_inliers', type=int, default=12, help='Duplicates: geometrically consistent SIFT matches')
-    parser.add_argument('--min_inliers_similar', type=int, default=10, help='... or this many for faces with similar details')
-    parser.add_argument('--similar_detail', type=float, default=0.7, help='Face detail correlation of the faces with similar details')
     parser.add_argument('--auto_detail', type=float, default=0.95, help='Duplicates without verification: face detail correlation')
     parser.add_argument('--cache', default=None, help='.npy file keeping the loaded faces (and <cache>.sift.pkl the SIFT '
                                                        'features): re-runs with other thresholds skip the loading')
@@ -229,10 +226,7 @@ def main():
 
     table, excluded = [], {}
     ordered = sorted(best.items(), key=lambda x: (-inliers.get(x[0], -1), -x[1][2]))
-    def is_duplicate(key, detail):
-        count = inliers.get(key, -1)
-        return (count >= args.min_inliers or detail >= args.auto_detail or
-                (count >= args.min_inliers_similar and detail >= args.similar_detail))
+    is_duplicate = lambda key, detail: inliers.get(key, -1) >= args.min_inliers or detail >= args.auto_detail
     for (e, t), (distance, correlation, detail, mirrored) in ordered:
         count = inliers.get((e, t), -1)
         duplicate = is_duplicate((e, t), detail)
